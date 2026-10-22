@@ -139,7 +139,11 @@ static const struct susfs_import susfs_imports[] = {
     IMP(__put_cred),
     IMP(strnlen_user),
     IMP(___ratelimit),
+#ifdef CONFIG_HARDENED_USERCOPY
+    /* copy_to_user() inlines when this is off, so the symbol is not there - a guard that
+     * lists a name the kernel never exports becomes an unresolved import itself. */
     IMP(__check_object_size),
+#endif
     IMP(queue_delayed_work_on),
     IMP(cancel_delayed_work_sync),
     IMP(delayed_work_timer_fn),

@@ -43,13 +43,7 @@
 #include "susfs_log.h"
 #include "susfs_fp_hook.h"
 #include "susfs_rkp.h"
-
-/* The BTI landing pad of an indirect call target: 'bti c' (an unallocated HINT
- * on cores without BTI, so checking for it is correct either way). */
-#define SUSFS_ARM64_BTI_C	0xd503245fu
-#define SUSFS_ARM64_BTI_JC	0xd50324dfu
-#define SUSFS_ARM64_PACIASP	0xd503233fu
-#define SUSFS_ARM64_PACIBSP	0xd503237fu
+#include "susfs_arm64.h"	/* the landing-pad test */
 
 static susfs_syscall_fn_t *sys_call_table_ptr;
 static susfs_syscall_fn_t *compat_sys_call_table_ptr;
@@ -218,8 +212,6 @@ void susfs_fp_dump_entry(int nr, const char *sym)
 		((READ_ONCE(sys_call_table_ptr[nr]) == (susfs_syscall_fn_t)plain) ? "plain match" : "neither"));
 }
 
-static bool fp_has_landing_pad(const void *fn);
-
 void susfs_fp_dump_wrapper(const char *name, const void *fn)
 {
 	if (!fn) {
@@ -228,20 +220,7 @@ void susfs_fp_dump_wrapper(const char *name, const void *fn)
 	}
 	pr_info("susfs_fp: %s at %px first insn 0x%08x (%s)\n", name, fn,
 		READ_ONCE(*(const u32 *)fn),
-		fp_has_landing_pad(fn) ? "CALL LANDING PAD" : "NO LANDING PAD");
-}
-
-static bool fp_has_landing_pad(const void *fn)
-{
-	switch (READ_ONCE(*(const u32 *)fn)) {
-	case SUSFS_ARM64_BTI_C:
-	case SUSFS_ARM64_BTI_JC:
-	case SUSFS_ARM64_PACIASP:
-	case SUSFS_ARM64_PACIBSP:
-		return true;
-	default:
-		return false;
-	}
+		susfs_arm64_fn_has_landing_pad(fn) ? "CALL LANDING PAD" : "NO LANDING PAD");
 }
 
 int susfs_fp_install(struct susfs_fp_hook *h)
@@ -274,7 +253,7 @@ int susfs_fp_install(struct susfs_fp_hook *h)
 		pr_warn("susfs_fp: %s: no native entry and no compat entry\n", h->name);
 		return -EINVAL;
 	}
-	if (!h->wrapper || !fp_has_landing_pad((const void *)h->wrapper)) {
+	if (!h->wrapper || !susfs_arm64_fn_has_landing_pad((const void *)h->wrapper)) {
 		pr_warn("susfs_fp: %s has no valid call landing pad (0x%08x) - not installed\n",
 			h->name, h->wrapper ? READ_ONCE(*(const u32 *)h->wrapper) : 0);
 		return -EINVAL;

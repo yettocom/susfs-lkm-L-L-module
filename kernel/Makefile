@@ -8,12 +8,13 @@
 
 obj-m += susfs_samsung_lkm.o
 
-susfs_samsung_lkm-objs := susfs_main.o patch_memory.o symbol_resolver.o lsm_hook.o \
-              susfs_uname.o susfs_kstat.o sus_map.o sus_path.o sus_mount.o \
-              spoof_cmdline.o susfs_open_redirect.o susfs_enable_log.o \
-              susfs_avc_spoof.o susfs_supercall.o susfs_hide_syms.o imports_guard.o \
-              ksu_umount_gate.o susfs_fp_hook.o susfs_opath.o susfs_or_entry.o \
-              fsnotify_lifetime.o btf_layout.o susfs_samsung_cred.o sus_dirent.o susfs_rkp.o
+susfs_samsung_lkm-objs := susfs_main.o patch_memory.o symbol_resolver.o lsm_hook.o\
+              susfs_uname.o susfs_kstat.o sus_map.o sus_path.o sus_mount.o\
+              spoof_cmdline.o susfs_open_redirect.o susfs_enable_log.o\
+              susfs_avc_spoof.o susfs_supercall.o susfs_hide_syms.o imports_guard.o\
+              ksu_umount_gate.o ksu_allow_gate.o susfs_fp_hook.o susfs_opath.o\
+              susfs_or_entry.o fsnotify_lifetime.o btf_layout.o\
+              susfs_samsung_cred.o sus_dirent.o susfs_rkp.o
 
 # The dcache/icache flush helper is NOT picked at build time any more: which spelling a kernel
 # carries is not decided by its version number (a vendor kernel can keep the pre-5.14 name, measured
@@ -61,7 +62,7 @@ endif
 # ON by default, the same way KernelSU's Samsung builds always pass
 # CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y: this fork builds for Samsung, so the safe path is the
 # one you get unless you ask for the other.  Build the upstream behaviour with
-# `make ... SUSFS_SAMSUNG_NO_PATCH_TEXT=0`.
+# `make ... SUSFS_SAMSUNG_NO_PATCH_TEXT=0` (verify.sh does, to diff the two).
 SUSFS_SAMSUNG_NO_PATCH_TEXT ?= 1
 ccflags-y += -DSUSFS_SAMSUNG_NO_PATCH_TEXT=$(SUSFS_SAMSUNG_NO_PATCH_TEXT)
 

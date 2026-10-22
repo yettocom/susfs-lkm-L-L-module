@@ -48,6 +48,7 @@
 #include <linux/errno.h>
 #include <linux/fs.h>		/* struct file, FMODE_PATH */
 #include <linux/file.h>		/* fput() */
+#include <linux/fdtable.h>	/* files_struct/fdtable for atomic fd rollback */
 #include <linux/dcache.h>	/* d_inode() */
 #include <linux/atomic.h>
 #include <linux/cred.h>		/* current_uid(), for the control node */
@@ -68,7 +69,9 @@
 #include "susfs.h"		/* susfs_control_node_allowed(), sus_path_inode_hidden_public() */
 #include "susfs_opath.h"
 #include "susfs_fp_hook.h"
+#include "susfs_arm64.h"	/* the landing-pad test is shared, not spelled out again */
 #include "susfs_or_entry.h"	/* open_redirect's name layer shares exactly these five entries */
+#include "ksu_allow_gate.h"	/* the control-node gate is su's own */
 
 /* The AArch32 numbers.  No arm64 header defines them as __NR_*: they are what
  * arch/arm64/include/asm/unistd32.h is generated from, i.e.
@@ -86,18 +89,6 @@
  * the layer entirely.  It needs its own entry, its own wrapper and its own original slot even
  * though both slots hold the same function. */
 #define SUSFS_COMPAT_NR_OPENAT2		437
-
-/* The BTI landing pad an indirect call into this module has to land on.  fp_has_landing_pad()
- * in susfs_fp_hook.c is static and is what susfs_fp_install() refuses a wrapper with; the same
- * test is written out here so opath_dump can report it on the device for a wrapper that is not
- * installed at all - a dump whose answer only exists when the hook is already live would be
- * useless for the step it is meant for. */
-#define SUSFS_ARM64_BTI_C	0xd503245fu
-
-static inline bool opath_has_landing_pad(const void *fn)
-{
-	return fn && READ_ONCE(*(const u32 *)fn) == SUSFS_ARM64_BTI_C;
-}
 
 /* Resolved by name at init and cached, exactly like sus_open_redirect.c does it.  fget_raw() is
  * exported, but GKI's module symbol list is not a promise; the close-fd helpers are global
@@ -143,11 +134,6 @@ static int (*opath_close_fd_get_file)(unsigned int fd, struct file **res);
 /* Set when the resolved helper took a reference of its own (the pre-6.1 close_fd_get_file()):
  * the deny path then owes the file two fput()s, and one of them would leak it for good. */
 static bool opath_close_fd_extra_ref;
-/* Needed on the one path that has to UNDO a take: when the descriptor changed hands between the
- * check and the take (files_struct is shared - CLONE_FILES), the file now in hand is not the hidden
- * one and has to go back into the table it came out of.  See susfs_opath_post_fd(); fd_install() is
- * exported everywhere and is already resolved by susfs_or_entry.c for the same purpose. */
-static void (*opath_fd_install)(unsigned int fd, struct file *file);
 /* Which name the kernel above answered to (see susfs_opath_init): only the log needs it, and a log
  * that prints a pointer without the name it came from cannot tell close_fd_get_file from
  * file_close_fd on a kernel where one of them is missing. */
@@ -189,6 +175,43 @@ static __nocfi struct file *opath_take_fd(unsigned int fd)
 		return f;
 #endif
 	return NULL;
+}
+
+/* Return a raced descriptor only while holding the fd-table lock.  fd_install() cannot be used
+ * here: another CLONE_FILES thread may fill the slot after opath_take_fd() releases the kernel's
+ * lock, and fd_install() BUG_ON()s when the slot is no longer empty.  A failed restore leaves the
+ * slot owner untouched; the caller drops the references it took and keeps the original answer. */
+static bool opath_restore_fd(unsigned int fd, struct file *file)
+{
+	struct files_struct *files = current->files;
+	struct fdtable *fdt;
+	unsigned int word;
+	bool restored = false;
+
+	spin_lock(&files->file_lock);
+	fdt = files_fdtable(files);
+	/* An open bit set with an empty slot means another thread has reserved this number and is
+	 * between alloc_fd() and its lockless fd_install().  Do not race that publisher. */
+	if (fd < fdt->max_fds && !test_bit(fd, fdt->open_fds) &&
+	    !rcu_access_pointer(fdt->fd[fd])) {
+		rcu_assign_pointer(fdt->fd[fd], file);
+		__set_bit(fd, fdt->open_fds);
+		word = fd / BITS_PER_LONG;
+		if (!~fdt->open_fds[word])
+			__set_bit(word, fdt->full_fds_bits);
+		if (fd < files->next_fd)
+			files->next_fd = fd;
+		restored = true;
+	}
+	spin_unlock(&files->file_lock);
+	return restored;
+}
+
+static void opath_drop_taken(struct file *file)
+{
+	fput(file);
+	if (opath_close_fd_extra_ref)
+		fput(file);
 }
 
 /* What the layer did, not what it is configured to do: a wrapper that never runs and one that
@@ -269,15 +292,15 @@ __nocfi long susfs_opath_post_fd(long ret)
 
 	if (victim != f) {
 		/* The number changed hands.  What came out is not the hidden file, so it is not ours to
-		 * remove: put it back exactly where it was and let the open stand.  fd_install() takes
-		 * over the reference the take had reserved for the table, so all that is left to drop
-		 * here is what fget_raw() took (plus, before 6.1, the one the helper added).  Closing it
-		 * instead would take away a descriptor this layer was never asked about, and answering
-		 * -ENOENT would deny an open that matched nothing. */
-		opath_fd_install((unsigned int)ret, victim);
-		fput(f);
-		if (opath_close_fd_extra_ref)
+		 * remove.  Restore it only if the slot is still empty; otherwise leave the other thread's
+		 * descriptor untouched and drop the references returned by the take.  Closing it instead
+		 * would take away a descriptor this layer was never asked about, and answering -ENOENT would
+		 * deny an open that matched nothing. */
+		if (!opath_restore_fd((unsigned int)ret, victim))
+			opath_drop_taken(victim);
+		else if (opath_close_fd_extra_ref)
 			fput(victim);
+		fput(f);
 		atomic_inc(&n_opath_err);
 		return ret;
 	}
@@ -519,7 +542,7 @@ static void susfs_opath_dump_all(void)
 
 		pr_info("opath dump: [%d] %s nr=%d nr_compat=%d wrapper=%px bti_c=%d\n",
 			i + 1, h->name, h->nr, h->nr_compat,
-			(void *)h->wrapper, (int)opath_has_landing_pad((const void *)h->wrapper));
+			(void *)h->wrapper, (int)susfs_arm64_fn_has_landing_pad((const void *)h->wrapper));
 
 		/* susfs_fp_dump_entry() prints the native table only, so the compat entries are
 		 * printed here - through the accessor, because the table pointer itself is
@@ -574,7 +597,7 @@ static int opath_proc_open(struct inode *inode, struct file *file)
 	/* Root-only, with 0777 on the node on purpose: DAC has to pass so that sus_path's LSM
 	 * layer is the only thing answering a non-root reader (ENOENT), see susfs_main.c and
 	 * susfs_kstat_init().  Created only when that layer is up (susfs_control_node_allowed). */
-	if (current_uid().val != 0)
+	if (!susfs_control_visible())
 		return -ENOENT;
 	return single_open(file, opath_proc_show, NULL);
 }
@@ -589,10 +612,6 @@ int susfs_opath_init(void)
 	}
 
 	opath_fget_raw = (void *)find_kernel_symbol_exact("fget_raw");
-	/* The undo of a take that raced with a close/open on the same number: see the note on the
-	 * pointer and in susfs_opath_post_fd().  Without it the layer could not give back a descriptor
-	 * it took by number and found changed hands, so it refuses to install instead. */
-	opath_fd_install = (void *)find_kernel_symbol_exact("fd_install");
 
 	/* Which close-fd helper this kernel has, under WHICH prototype.  close_fd_get_file() kept its
 	 * name across 6.1 and changed its signature there, so the prototype comes from the kernel
@@ -614,15 +633,13 @@ int susfs_opath_init(void)
 	opath_close_fd_extra_ref = true;
 #endif
 
-	if (!opath_fget_raw || !opath_fd_install || !opath_close_fd_resolved()) {
+	if (!opath_fget_raw || !opath_close_fd_resolved()) {
 		/* Refusing to install beats installing a wrapper that cannot finish: without these the
-		 * post-check could not take a descriptor away - or could not give one back after a take
-		 * that raced - so the layer would only have added a fault path to every open on the
-		 * system.  Every name is printed, because "the name is missing" is only useful with
-		 * which one. */
-		pr_warn("opath: fget_raw=%px fd_install=%px close_fd_get_file=%px file_close_fd=%px - a name was not resolved, no table entry is installed and O_PATH stays visible\n",
+		 * post-check could not take a descriptor away, so the layer would only have added a fault
+		 * path to every open on the system.  Every name is printed, because "the name is missing"
+		 * is only useful with which one. */
+		pr_warn("opath: fget_raw=%px close_fd_get_file=%px file_close_fd=%px - a name was not resolved, no table entry is installed and O_PATH stays visible\n",
 			(void *)opath_fget_raw,
-			(void *)opath_fd_install,
 			(void *)find_kernel_symbol_exact("close_fd_get_file"),
 			(void *)find_kernel_symbol_exact("file_close_fd"));
 		atomic_inc(&n_opath_err);

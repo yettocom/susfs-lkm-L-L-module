@@ -1,10 +1,9 @@
 #!/bin/bash
-# Build susfs_samsung_lkm.ko for every packaged KMI against a DDK kernel tree, with the Samsung
-# (RKP) path on.  Needs docker and the ghcr.io/ylarod/ddk-min images.
+# Build susfs_samsung_lkm.ko against a DDK kernel tree, with the Samsung (RKP) path on.
 set -euo pipefail
 
-SRC="$(cd "$(dirname "$0")" && pwd)"
-OUT="${OUT:-$SRC/out}"
+SRC=/mnt/d/root/susfs4ksu-lkm-work
+OUT=/mnt/d/root/susfs4ksu-lkm-work/out
 
 build() {
     local kmi="$1" rel="$2" out="$3" samsung="${4:-1}"
