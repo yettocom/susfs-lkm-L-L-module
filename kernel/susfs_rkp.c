@@ -45,7 +45,11 @@
 #define susfs_rkp_free(p) vfree(p)
 #endif
 
-#define SUSFS_RKP_MAX_SITES 16
+/* 14 kstat entries and 5 opath entries resolve to 18 distinct targets, and the direct-route
+ * fallback adds a few more: 16 left the last installs with -ENOMEM, i.e. those hooks stayed
+ * on the direct route without a word.  The stub page holds PAGE_SIZE/16 slots, so the site
+ * table is the only limit. */
+#define SUSFS_RKP_MAX_SITES 24
 
 /*
  * One stub is 16 bytes, entry at +4:
@@ -440,9 +444,14 @@ void susfs_rkp_exit(void)
 
     while (rkp_site_count > 0) {
         site = &rkp_sites[rkp_site_count - 1];
-        if (susfs_rkp_restore_site(site)) {
-            pr_warn("rkp: %pS keeps its branch\n", site->fn);
+        /* Two attempts, then keep the record: a branch that is still installed must stay
+         * known, because dropping it is what turns "cannot restore" into "restored" and
+         * lets the stub page be freed under a live jump.  Keeping it also keeps the page. */
+        if (susfs_rkp_restore_site(site) && susfs_rkp_restore_site(site)) {
+            pr_err("rkp: %pS keeps its branch; unloading this module would leave a jump into freed text\n",
+                   site->fn);
             restored = false;
+            break;
         }
         rkp_site_count--;
     }
