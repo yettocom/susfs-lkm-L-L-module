@@ -6,21 +6,27 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/proc_fs.h>
-#include <linux/seq_file.h>
-#include <linux/cred.h>	/* current_uid(): the status node's own root check */
 #include <linux/version.h>	/* LINUX_VERSION_CODE: the MODULE_IMPORT_NS spelling below */
+#include <linux/fs.h>		/* d_inode() for the control-node labels */
+#include <linux/namei.h>	/* kern_path() */
+#include <linux/path.h>		/* path_put() */
+#include <linux/security.h>	/* security_secctx_to_secid(): the nodes' SELinux label */
+#include <linux/proc_fs.h>	/* proc_create() for /proc/susfs_status */
+#include <linux/seq_file.h>	/* single_open()/seq_read() for the same node */
+#include <linux/cred.h>		/* current_uid(): the status node's own gate, without KernelSU */
 
 #include "symbol_resolver.h"
 #include "patch_memory.h"	/* ksu_patch_memory_init(): the flush helper's name differs per kernel */
 #include "susfs_log.h"
 #include "ksu_umount_gate.h"
+#include "ksu_allow_gate.h"	/* KernelSU's allow predicate: the control-node gate */
+#include "btf_layout.h"		/* the SELinux inode_security_struct.sid offset, by BTF */
+#include "susfs_abi.h"		/* SUSFS_VERSION_STR / SUSFS_VARIANT_STR: what /proc/susfs_status prints */
+#include "susfs_rkp.h"		/* susfs_rkp_init/exit, susfs_rkp_active(): the branch route */
+#include "susfs_fp_hook.h"	/* susfs_fp_drain(): "no task is still inside this module" */
 #include "lsm_hook.h"
 #include "susfs.h"
-#include "susfs_abi.h"		/* SUSFS_VARIANT_STR: the status node reports it */
-#include "susfs_rkp.h"
 #include "susfs_opath.h"	/* SUSFS_OPATH_NODE + the layer's init/exit */
-#include "susfs_fp_hook.h"	/* susfs_fp_drain(): the shared "no task is still inside this module" wait */
 
 /* The module's own name lives in susfs.h (SUSFS_LKM_MODULE_NAME / SUSFS_LKM_SYSFS_DIR):
  * /sys/module's directory and the rules that hide it (susfs_hide_syms.c) must agree, and the
@@ -37,7 +43,7 @@
  * Hence 0777: DAC passes, the LSM layer is the only thing that answers (ENOENT for every
  * non-root caller).
  * The nodes exist only when the layer that hides them is installed
- * (susfs_control_node_allowed()), so an unprotected world-writable node cannot happen, and
+ * (susfs_control_visible()), so an unprotected world-writable node cannot happen, and
  * root-only access is enforced by the handlers' uid checks, not by the mode.  expose_proc=0
  * removes the nodes entirely. */
 bool susfs_expose_proc = true;
@@ -56,12 +62,12 @@ static const char *const susfs_self_hide_paths[] = {
     /* The O_PATH layer's node: it reports the four sys_call_table/compat_sys_call_table
      * entries and the counters that say whether a wrapper ever ran. */
     SUSFS_OPATH_NODE,
-    /* The status node: which route the table-entry layers took and which layers are up. */
+    /* This ko's own status node: it reports which route the table-entry layers took, so an
+     * operator probing for it must get ENOENT like for every other control node. */
     "/proc/susfs_status",
     /* The module's own sysfs directory is NOT here: it belongs to hide_module
      * (susfs_hide_syms.c), which adds and drops that rule at runtime. */
 };
-
 
 /* Register our control nodes in sus_path's hidden set: probing them must answer ENOENT,
  * not EACCES.  Runs after every feature init (the nodes must exist for kern_path() to
@@ -80,6 +86,141 @@ static void susfs_self_hide_nodes(void)
             pr_warn("susfs_samsung_lkm: self-hide %s failed %d\n",
                     susfs_self_hide_paths[i], rc);
     }
+}
+
+/* The control nodes are born with procfs's default label, u:object_r:proc:s0, whose policy refuses
+ * even an adb shell that this module's gate accepted (measured: `cat /proc/susfs_open_redirect`
+ * from u:r:shell:s0 is EACCES, while the same read from u:r:ksu:s0 works).  ksu_file is the type
+ * the KernelSU policy already grants to the processes that may use su - exactly the set these
+ * nodes exist for - so they are moved under it.
+ *
+ * There is no LSM interface for this: security_inode_setsecurity() has no inode_setsecurity hook
+ * registered on this kernel (it answers the framework default, -EOPNOTSUPP, for either spelling of
+ * the attribute name), and procfs has no xattr handler to go through the VFS.  What is left is the
+ * field SELinux itself reads: inode->i_security points at its private inode_security_struct (until
+ * the per-LSM blob split in 6.4), and the `sid` member is what every check uses.  The offset comes
+ * from BTF and the member's type is verified, so a kernel whose layout moved it is refused instead
+ * of being written at a guess.
+ *
+ * This runs once at load, on inodes nobody has opened yet; a plain 32-bit store needs no lock. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+static const char susfs_control_selinux_ctx[] = "u:object_r:ksu_file:s0";
+static const char susfs_proc_selinux_ctx[] = "u:object_r:proc:s0";
+static size_t susfs_isec_base_offset;	/* SELinux's slot inside inode->i_security */
+static size_t susfs_isec_sid_offset;
+static u32 susfs_control_sid;
+static u32 susfs_proc_sid;
+
+static bool susfs_prepare_control_sid(void)
+{
+    unsigned long blob_sizes;
+    size_t lbs_inode_off;
+    int sel_off;
+    int rc;
+
+    if (security_secctx_to_secid(susfs_control_selinux_ctx,
+                                 strlen(susfs_control_selinux_ctx),
+                                 &susfs_control_sid) ||
+        !susfs_control_sid)
+        return false;
+    if (security_secctx_to_secid(susfs_proc_selinux_ctx,
+                                 strlen(susfs_proc_selinux_ctx),
+                                 &susfs_proc_sid) ||
+        !susfs_proc_sid)
+        return false;
+    /* Idempotent: the fsnotify layer has usually called this already. */
+    if (susfs_btf_layout_init())
+        return false;
+    /* Every Android 5.15 here carries the per-LSM blob allocation even though the split landed
+     * upstream later: inode->i_security is then a blob whose SELinux slot starts at
+     * selinux_blob_sizes.lbs_inode.  A kernel without that symbol is the older shape, where
+     * inode->i_security IS the struct and the base stays 0. */
+    blob_sizes = find_kernel_symbol_exact("selinux_blob_sizes");
+    if (blob_sizes) {
+        if (susfs_btf_member_offset("lsm_blob_sizes", "lbs_inode", "int",
+                                    &lbs_inode_off))
+            return false;
+        sel_off = READ_ONCE(*(int *)((char *)blob_sizes + lbs_inode_off));
+        if (sel_off < 0 || sel_off > 4096)
+            return false;
+        susfs_isec_base_offset = (size_t)sel_off;
+    }
+    rc = susfs_btf_member_offset("inode_security_struct", "sid", "uint",
+                                 &susfs_isec_sid_offset);
+    return !rc;
+}
+
+/* The write is only made where the field already holds the proc label: that is what proves the
+ * base, the offset and the blob ownership are all right on the kernel actually running.  Anything
+ * else is left alone - a wrong guess here would corrupt a live struct. */
+static void susfs_set_inode_sid(struct inode *inode, u32 sid)
+{
+    u32 *field;
+
+    if (!inode->i_security)
+        return;
+    field = (u32 *)((char *)inode->i_security + susfs_isec_base_offset +
+                    susfs_isec_sid_offset);
+    if (READ_ONCE(*field) != susfs_proc_sid)
+        return;
+    WRITE_ONCE(*field, sid);
+}
+#endif
+
+static void susfs_relabel_control_nodes(void)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
+    /* The split is upstream here and the blob walk above is untested there, so the nodes keep their
+     * default (proc) label.  That is exactly why the gate must NOT widen here: susfs_control_visible()
+     * stays root-only until susfs_control_relabelled is set, because proc's policy answers EACCES to
+     * the shell and to su-granted apps - the gate letting them in would turn the nodes' ENOENT into
+     * an EACCES that proves they exist (susfs4ksu-lkm#108). */
+    return;
+#else
+    int i, found = 0, changed = 0;
+
+    if (!susfs_expose_proc)
+        return;
+    /* Without KernelSU's predicate there is no wider gate to widen to, and ksu_file's policy
+     * grants these nodes to a set this kernel cannot recognise: relabelling them would only move
+     * them under a type nothing may read.  Keep proc's label, and the root-only gate that goes
+     * with it. */
+    if (READ_ONCE(susfs_ksu_allow_kind) != 1) {
+        SUSFS_LOGI("susfs: no KernelSU predicate - control nodes keep proc's label, gate stays root-only\n");
+        return;
+    }
+    if (!susfs_prepare_control_sid()) {
+        SUSFS_LOGI("susfs: no ksu_file label applied (context or BTF layout unavailable)\n");
+        return;
+    }
+    for (i = 0; i < ARRAY_SIZE(susfs_self_hide_paths); i++) {
+        struct path p;
+        struct inode *inode;
+
+        if (kern_path(susfs_self_hide_paths[i], 0, &p))
+            continue;
+        found++;
+        inode = d_inode(p.dentry);
+        if (inode && inode->i_security) {
+            u32 *field = (u32 *)((char *)inode->i_security +
+                                 susfs_isec_base_offset +
+                                 susfs_isec_sid_offset);
+
+            if (READ_ONCE(*field) == susfs_proc_sid) {
+                susfs_set_inode_sid(inode, susfs_control_sid);
+                changed++;
+            }
+        }
+        path_put(&p);
+    }
+    SUSFS_LOGI("susfs: %d of %d control node(s) relabelled to %s\n",
+               changed, found, susfs_control_selinux_ctx);
+    /* Only a node that is actually relabelled may be widened to the KernelSU set: a node left under
+     * proc's label answers EACCES to exactly the callers the wider gate just admitted, and EACCES
+     * says "it is here" where ENOENT says "nothing here".  All-or-nothing on purpose - a partial
+     * relabel means the set is not usable, and root-only is what those labels say anyway. */
+    WRITE_ONCE(susfs_control_relabelled, found > 0 && changed == found);
+#endif
 }
 
 /* ---- layer table: arming order IS the teardown order, reversed --------------
@@ -109,16 +250,17 @@ static struct {
     bool armed;			/* exit is run for every layer that was attempted */
     bool up;			/* init returned 0 - what /proc/susfs_status reports */
 } susfs_layers[] = {
+    /* First of all: the branch route has to know whether it is usable before any layer below
+     * installs a table entry, and it is torn down last (susfs_layers_down() walks backwards),
+     * so every branch is restored and the stub page freed after its last user is gone.  Not
+     * fatal: a kernel without RKP simply keeps the direct route. */
+    { "rkp_branch",	susfs_rkp_init,			susfs_rkp_exit,		false, false },
     /* First, and NOT fatal: this layer only decides whether KernelSU's predicate was found at load.
      * When it was not, the gates answer the pre-#34 way and every other layer still works - so a
      * failure here is a degradation, not a reason to refuse the module.  Skipping this init entirely
      * (fail_layer=1) is safe for the same reason: the flag it sets defaults to the pre-#34 answer. */
-    /* First of all: the branch route has to know whether it is usable before any layer below
-     * installs a table entry, and it is torn down last (susfs_layers_down() walks backwards), so
-     * every branch is restored and the stub page freed after its last user is gone.  Not fatal:
-     * a kernel without RKP simply keeps the direct route. */
-    { "rkp_branch",	susfs_rkp_init,			susfs_rkp_exit,		false, false },
     { "ksu_umount_gate", susfs_ksu_umount_gate_init,	susfs_ksu_umount_gate_exit, false, false },
+    { "ksu_allow_gate",	susfs_ksu_allow_gate_init,	NULL,			false, false },
     { "lsm_hook",	layer_lsm_hook_init,		ksu_lsm_hook_exit,	false, false },
     { "sus_path",	sus_path_init,			sus_path_exit,		true,  false },
     /* After sus_path, because this layer asks sus_path's rule table for every open it
@@ -197,7 +339,7 @@ static int susfs_status_proc_open(struct inode *inode, struct file *file)
     /* Same contract as the other nodes (susfs_enable_log.c): 0777 so DAC passes and sus_path's
      * hidden set is what answers ENOENT for non-root callers - plus this check, for the case
      * where that hook is not the one answering. */
-    if (current_uid().val != 0)
+    if (!susfs_control_visible())
         return -ENOENT;
     return single_open(file, susfs_status_proc_show, NULL);
 }
@@ -216,7 +358,7 @@ static struct proc_dir_entry *susfs_status_entry;
  * layer down first would expose it for the length of the unload. */
 static void susfs_status_node_up(void)
 {
-    if (!susfs_control_node_allowed())
+    if (!susfs_control_visible())
         return;
 
     susfs_status_entry = proc_create("susfs_status", 0777, NULL, &susfs_status_proc_ops);
@@ -255,23 +397,12 @@ static void susfs_layers_down(int upto)
             susfs_layers[i].exit();
     }
 
-    /* After every probe is unregistered and before this module's text can be freed (both callers -
-     * module_exit() and the rollback of a failed init - end in the kernel's free_module()): a
-     * kretprobe RETURN handler runs as an ordinary call on the task's own stack, not in exception
-     * context, so a task can be preempted inside it, and unregister_kretprobe()'s own
-     * synchronize_rcu() does not wait for that.  The freed text is then resumed into - a
-     * use-after-free on the next instruction.  synchronize_rcu_tasks() is the primitive that
-     * closes it: its quiescent states are voluntary context switches only (kernel/rcu/tasks.h:
-     * "end at a voluntary context switch (not a preemption!)"), so a task parked inside module code
-     * blocks the grace period until it has left.  The kprobe PRE-handlers (BRK) need no wait - they
-     * run in exception context, which cannot pass a quiescent state at all - and the LSM and O_PATH
-     * layers drain on their own, but the other layers' kretprobes (uname, kstat, open_redirect,
-     * sus_map, sus_mount) did not, which left exactly that window open on `rmmod`.  One statement
-     * here covers all of them, in both teardown paths.
-     *
-     * Cost: one grace period, on unload and on a failed load's rollback.  susfs_fp_drain() is the
-     * existing helper - synchronize_rcu() + synchronize_rcu_tasks(), with a 50 ms fallback when the
-     * symbol is not in kallsyms (it is on this device: `T synchronize_rcu_tasks`). */
+    /* Everything that could still be inside this module has left.  A kretprobe return handler
+     * runs *after* the probed function returns, on that task's stack, so the task can be preempted
+     * inside it while this unload frees the code it is about to return into - only a task grace
+     * period closes that window (susfs_fp_drain() is synchronize_rcu_tasks, resolved by name).  It
+     * runs once per teardown, on unload and on a failed load's rollback; the per-layer exits are
+     * idempotent and therefore need no barrier of their own. */
     susfs_fp_drain();
 }
 
@@ -333,8 +464,11 @@ static int __init susfs_init(void)
 
     /* Registered last and undone implicitly: these are entries in sus_path's table, which
      * sus_path_exit() empties while its LSM layer still answers ENOENT for the nodes. */
+    /* The node prints the table, so it is created after every layer has run and removed before
+     * the layers go down - see susfs_exit(). */
     susfs_status_node_up();
     susfs_self_hide_nodes();
+    susfs_relabel_control_nodes();
 
     /* Operator note.  The module hides its own traces from EVERY caller, root included (a
      * built-in SUSFS has no module entry, so hiding it only from non-root would leave a
@@ -353,7 +487,7 @@ static int __init susfs_init(void)
 
 static void __exit susfs_exit(void)
 {
-    /* Before the layers: see susfs_status_node_up(). */
+    /* Removed first: the node is 0777 and sus_path's LSM layer is what answers ENOENT for it. */
     susfs_status_node_down();
     susfs_layers_down((int)ARRAY_SIZE(susfs_layers) - 1);
     SUSFS_LOGI("susfs_samsung_lkm: exit\n");
@@ -399,4 +533,4 @@ MODULE_IMPORT_NS("VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver");
 #else
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 #endif
-MODULE_DESCRIPTION("SUSFS Samsung LKM (susfs_samsung_lkm) v2.3.0-gki");
+MODULE_DESCRIPTION("SUSFS guard LKM (susfs_samsung_lkm) v2.3.0-gki");

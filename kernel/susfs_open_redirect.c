@@ -58,6 +58,7 @@
 #include "susfs.h"		/* susfs_expose_proc, sus_path_lsm_active */
 #include "symbol_resolver.h"	/* find_kernel_symbol_exact */
 #include "ksu_umount_gate.h"	/* susfs_is_current_proc_umounted_app (issue #34) */
+#include "ksu_allow_gate.h"	/* the control-node gate is su's own */
 #include "susfs_kprobe.h"
 #include "susfs_or_entry.h"	/* susfs_or_entry_armed(): the forward direction lives there now */
 
@@ -680,7 +681,9 @@ static int or_fdinfo_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 }
 
 /* Find `label` in the already formatted buffer and parse the decimal that follows it; false when
- * the label is absent or has no digits. */
+ * the label is absent or has no digits.  procfs prints inode and mount ids as unsigned long, so
+ * keep the full native width here instead of the 32-bit limit that hid large inode numbers from
+ * the rewrite. */
 static bool or_fdinfo_find_dec(struct seq_file *m, const char *label, size_t label_len,
 			       size_t *out_pos, size_t *out_len, unsigned long *out_val)
 {
@@ -696,7 +699,7 @@ static bool or_fdinfo_find_dec(struct seq_file *m, const char *label, size_t lab
 	}
 	if (!pos)
 		return false;
-	while (pos + len < count && len < 10 &&
+	while (pos + len < count && len < sizeof(unsigned long) * 3 &&
 	       buf[pos + len] >= '0' && buf[pos + len] <= '9') {
 		v = v * 10 + (unsigned long)(buf[pos + len] - '0');
 		len++;
@@ -715,9 +718,9 @@ static bool or_fdinfo_find_dec(struct seq_file *m, const char *label, size_t lab
 static bool or_fdinfo_write_dec(struct seq_file *m, size_t pos, size_t len,
 				unsigned long new_val)
 {
-	char digits[12];
+	char digits[sizeof(unsigned long) * 3];
 	size_t count = m->count, i, n = 0;
-	unsigned int v = (unsigned int)new_val;
+	unsigned long v = new_val;
 
 	while (v) {
 		digits[n++] = (char)('0' + v % 10);
@@ -1080,7 +1083,7 @@ static int or_proc_open(struct inode *inode, struct file *file)
 {
 	/* 0777 is deliberate (the ENOENT contract comes from sus_path's hidden set, not from the mode), so refuse non-root
 	 * callers here too - see the note in susfs_enable_log.c's log_proc_open(). */
-	if (current_uid().val != 0)
+	if (!susfs_control_visible())
 		return -ENOENT;
 	return single_open(file, or_proc_show, NULL);
 }
@@ -1373,7 +1376,7 @@ static ssize_t or_proc_write(struct file *file, const char __user *buf,
 	long scheme;
 
 	/* Same gate as or_proc_open(): an fd opened before the opener dropped privileges must not become a way in. */
-	if (current_uid().val != 0)
+	if (!susfs_control_visible())
 		return -ENOENT;
 
 	if (len >= sizeof(cmd))
