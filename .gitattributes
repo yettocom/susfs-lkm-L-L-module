@@ -1,0 +1,4 @@
+# Upstream keeps a mixed tree (kernel/sus_path.c is committed as CRLF), so any
+# text=auto/eol conversion rewrites files and turns samsung.diff into a full-file
+# rewrite.  This tree is built byte-for-byte as checked out: no conversion at all.
+* -text
