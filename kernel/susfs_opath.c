@@ -69,6 +69,7 @@
 #include "susfs.h"		/* susfs_control_node_allowed(), sus_path_inode_hidden_public() */
 #include "susfs_opath.h"
 #include "susfs_fp_hook.h"
+#include "susfs_arm64.h"	/* the landing-pad test is shared, not spelled out again */
 #include "susfs_or_entry.h"	/* open_redirect's name layer shares exactly these five entries */
 #include "ksu_allow_gate.h"	/* the control-node gate is su's own */
 
@@ -88,18 +89,6 @@
  * the layer entirely.  It needs its own entry, its own wrapper and its own original slot even
  * though both slots hold the same function. */
 #define SUSFS_COMPAT_NR_OPENAT2		437
-
-/* The BTI landing pad an indirect call into this module has to land on.  fp_has_landing_pad()
- * in susfs_fp_hook.c is static and is what susfs_fp_install() refuses a wrapper with; the same
- * test is written out here so opath_dump can report it on the device for a wrapper that is not
- * installed at all - a dump whose answer only exists when the hook is already live would be
- * useless for the step it is meant for. */
-#define SUSFS_ARM64_BTI_C	0xd503245fu
-
-static inline bool opath_has_landing_pad(const void *fn)
-{
-	return fn && READ_ONCE(*(const u32 *)fn) == SUSFS_ARM64_BTI_C;
-}
 
 /* Resolved by name at init and cached, exactly like sus_open_redirect.c does it.  fget_raw() is
  * exported, but GKI's module symbol list is not a promise; the close-fd helpers are global
@@ -553,7 +542,7 @@ static void susfs_opath_dump_all(void)
 
 		pr_info("opath dump: [%d] %s nr=%d nr_compat=%d wrapper=%px bti_c=%d\n",
 			i + 1, h->name, h->nr, h->nr_compat,
-			(void *)h->wrapper, (int)opath_has_landing_pad((const void *)h->wrapper));
+			(void *)h->wrapper, (int)susfs_arm64_fn_has_landing_pad((const void *)h->wrapper));
 
 		/* susfs_fp_dump_entry() prints the native table only, so the compat entries are
 		 * printed here - through the accessor, because the table pointer itself is

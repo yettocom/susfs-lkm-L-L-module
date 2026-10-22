@@ -32,6 +32,7 @@
 
 #include "symbol_resolver.h"
 #include "susfs_rkp.h"
+#include "susfs_arm64.h"
 #include "susfs_log.h"
 
 #ifdef __aarch64__
@@ -63,9 +64,6 @@
 #define SUSFS_RKP_STUB_SIZE 16
 #define SUSFS_RKP_STUBS_PER_PAGE (PAGE_SIZE / SUSFS_RKP_STUB_SIZE)
 
-#define SUSFS_RKP_INSN_BTI_C 0xD503245Fu
-#define SUSFS_RKP_INSN_PACIASP 0xD503233Fu
-#define SUSFS_RKP_INSN_PACIBSP 0xD503237Fu
 #define SUSFS_RKP_INSN_B_OPC 0x14000000u
 
 typedef int (*susfs_rkp_insn_patch_t)(void *addrs[], u32 insns[], int cnt);
@@ -103,18 +101,6 @@ static u32 susfs_rkp_encode_b(void *from, void *to)
         return 0;
 
     return SUSFS_RKP_INSN_B_OPC | ((u32)imm26 & 0x3FFFFFFu);
-}
-
-static bool susfs_rkp_is_pac_signing(u32 insn)
-{
-    return insn == SUSFS_RKP_INSN_PACIASP || insn == SUSFS_RKP_INSN_PACIBSP;
-}
-
-/* BTI variants are bits[31:8] = 0xD50324 with an even op2 and bits[4:0] = 0x1F; the PAC
- * instructions are landing pads too, which is why they are accepted here. */
-static bool susfs_rkp_is_landing_pad(u32 insn)
-{
-    return (insn & 0xFFFFFF3Fu) == 0xD503241Fu || susfs_rkp_is_pac_signing(insn);
 }
 
 /* An instruction whose meaning depends on the address it sits at cannot be moved into a
@@ -310,7 +296,7 @@ int susfs_rkp_branch_patch_callthru(void *dst, void *src, void **callthru)
      * clobber the landing pad: an indirect call arrives with BLR, and a function whose
      * fn+0 no longer takes that call raises a BTI violation instead of running. */
     preamble_skip = 0;
-    while (preamble_skip < 2 && susfs_rkp_is_landing_pad(displaced)) {
+    while (preamble_skip < 2 && susfs_arm64_is_landing_pad(displaced)) {
         preamble_skip++;
         displaced = *(u32 *)((u8 *)fn + preamble_skip * 4);
     }
@@ -328,8 +314,8 @@ int susfs_rkp_branch_patch_callthru(void *dst, void *src, void **callthru)
     /* PACIASP/PACIBSP at fn+0 signs LR in place.  Left there, it would sign before the
      * branch, and a replacement that signs again in its own entry makes AUTXSP fail at its
      * epilogue - a fatal FPAC exception.  BTI C keeps the landing pad without signing. */
-    landing = SUSFS_RKP_INSN_BTI_C;
-    if (preamble_skip > 0 && susfs_rkp_is_pac_signing(fn0_insn))
+    landing = SUSFS_ARM64_BTI_C;
+    if (preamble_skip > 0 && susfs_arm64_is_pac(fn0_insn))
         landing = fn0_insn;
 
     branch = susfs_rkp_encode_b(patch_addr, new_fn);
@@ -364,7 +350,7 @@ int susfs_rkp_branch_patch_callthru(void *dst, void *src, void **callthru)
      * lose the landing pad or branch from a signed frame. */
     if (landing == fn0_insn && fn0_insn) {
         void *addrs[2] = { fn, patch_addr };
-        u32 insns[2] = { SUSFS_RKP_INSN_BTI_C, branch };
+        u32 insns[2] = { SUSFS_ARM64_BTI_C, branch };
 
         ret = rkp_insn_patch(addrs, insns, 2);
     } else {
