@@ -32,10 +32,19 @@ static inline bool susfs_arm64_is_pac(u32 insn)
 	return insn == SUSFS_ARM64_PACIASP || insn == SUSFS_ARM64_PACIBSP;
 }
 
-/* BTI variants: bits[31:8] = 0xD50324, an even op2, bits[4:0] = 0x1F. */
+/* Exactly the four words an indirect CALL may branch to, which is upstream's own test
+ * (fp_has_landing_pad() in susfs_fp_hook.c).  A mask would also accept plain `bti` and
+ * `bti j`: those are jump targets, not call targets, and a BLR onto one raises a
+ * branch-type exception on a BTI kernel. */
 static inline bool susfs_arm64_is_landing_pad(u32 insn)
 {
-	return (insn & 0xFFFFFF3Fu) == 0xD503241Fu || susfs_arm64_is_pac(insn);
+	switch (insn) {
+	case SUSFS_ARM64_BTI_C:
+	case SUSFS_ARM64_BTI_JC:
+		return true;
+	default:
+		return susfs_arm64_is_pac(insn);
+	}
 }
 
 /* The same test against the word at a function's entry, without dereferencing NULL. */
