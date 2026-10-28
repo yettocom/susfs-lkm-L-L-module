@@ -15,7 +15,7 @@ ASSETS = [
     ('android13-5.15_susfs_samsung_lkm.ko', '088ed7611b24c5e7606a169ff82627e26b43471d38c6fb8ffee3f16bf5adbcc4'),
     ('android14-6.1_susfs_samsung_lkm.ko', 'ad59beb6803aa90b39dde86d3d18089665fe45ac1858b6808de5c8c24daaf1c1'),
     ('android15-6.6_susfs_samsung_lkm.ko', 'bed18808c54c50ff7c4196620419873e17d50a60bff102c0b8090a7b85d36fed'),
-    ('susfs-lkm-module-v2.3.0-r18.5-L-L-arm64.zip', '1dec9cbf1d5e9e8dbd8e5e89faf592818f29370f8720cd06a7d4d182e1593e7e'),
+    ('susfs-lkm-module-v2.3.0-r18.5-L-L-arm64.zip', '0a0c2b7cd928ccc9f97b6b23d5fdde8ec1ab1ade66ff2df54c54d6354492e98a'),
 ]
 # Published source trees. Any tracked file here that the remote lacks is added.
 PUB_TREES = ('kernel/', 'module/', 'tools/', 'bin/')
