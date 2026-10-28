@@ -16,6 +16,7 @@
 #include <linux/cred.h>		/* current_uid(): the status node's own gate, without KernelSU */
 
 #include "symbol_resolver.h"
+#include "ksu_allow_gate.h"	/* susfs_ksu_allow_kind: whether ksu_file applies at all */
 #include "patch_memory.h"	/* ksu_patch_memory_init(): the flush helper's name differs per kernel */
 #include "susfs_log.h"
 #include "ksu_umount_gate.h"
@@ -23,10 +24,11 @@
 #include "btf_layout.h"		/* the SELinux inode_security_struct.sid offset, by BTF */
 #include "susfs_abi.h"		/* SUSFS_VERSION_STR / SUSFS_VARIANT_STR: what /proc/susfs_status prints */
 #include "susfs_rkp.h"		/* susfs_rkp_init/exit, susfs_rkp_active(): the branch route */
-#include "susfs_fp_hook.h"	/* susfs_fp_drain(): "no task is still inside this module" */
 #include "lsm_hook.h"
 #include "susfs.h"
 #include "susfs_opath.h"	/* SUSFS_OPATH_NODE + the layer's init/exit */
+#include "susfs_fp_hook.h"	/* susfs_fp_init: the sys_call_table cache every fp layer installs through;
+				 * susfs_fp_drain(): "no task is still inside this module" */
 
 /* The module's own name lives in susfs.h (SUSFS_LKM_MODULE_NAME / SUSFS_LKM_SYSFS_DIR):
  * /sys/module's directory and the rules that hide it (susfs_hide_syms.c) must agree, and the
@@ -62,6 +64,7 @@ static const char *const susfs_self_hide_paths[] = {
     /* The O_PATH layer's node: it reports the four sys_call_table/compat_sys_call_table
      * entries and the counters that say whether a wrapper ever ran. */
     SUSFS_OPATH_NODE,
+    SUSFS_MAP_NODE,
     /* This ko's own status node: it reports which route the table-entry layers took, so an
      * operator probing for it must get ENOENT like for every other control node. */
     "/proc/susfs_status",
@@ -72,7 +75,7 @@ static const char *const susfs_self_hide_paths[] = {
 /* Register our control nodes in sus_path's hidden set: probing them must answer ENOENT,
  * not EACCES.  Runs after every feature init (the nodes must exist for kern_path() to
  * resolve them) and after sus_path_init(), so the hooks are already patched. */
-static void susfs_self_hide_nodes(void)
+void susfs_self_hide_nodes(void)
 {
     int i;
 
@@ -181,10 +184,12 @@ static void susfs_relabel_control_nodes(void)
 
     if (!susfs_expose_proc)
         return;
-    /* Without KernelSU's predicate there is no wider gate to widen to, and ksu_file's policy
-     * grants these nodes to a set this kernel cannot recognise: relabelling them would only move
-     * them under a type nothing may read.  Keep proc's label, and the root-only gate that goes
-     * with it. */
+    /* No KernelSU, no ksu_file label.  That label exists so the KernelSU predicate's set
+     * (shell, the manager, su-granted apps) may read the nodes; without the predicate there is
+     * nobody to widen to, so the nodes keep proc's own label and the gate stays the original
+     * root-only one.  susfs_prepare_control_sid() would otherwise succeed here on BTF alone -
+     * a Magisk device has no KernelSU predicate but does have SELinux - and stamp a label this
+     * build has no use for. */
     if (READ_ONCE(susfs_ksu_allow_kind) != 1) {
         SUSFS_LOGI("susfs: no KernelSU predicate - control nodes keep proc's label, gate stays root-only\n");
         return;
@@ -232,48 +237,95 @@ static void susfs_relabel_control_nodes(void)
  * sus_path's LSM layer is what answers ENOENT for this module's own 0777 control nodes (see
  * the expose_proc note), so unhooking it before the nodes are removed would expose them to
  * every process during the unload - here the nodes go first and the LSM layer last.
- * `fatal` marks the two layers whose absence makes the module useless or silent: sus_path
- * and the supercall hook; the rest log their own failure and degrade to "off".  The exits
- * are idempotent, which lets one path serve rollback and unload alike. */
+ * The load plan marks four layers as fatal: fp_hook, lsm_hook, sus_path and supercall; the
+ * rest log their own failure and degrade to "off".  The exits are idempotent, which lets one
+ * path serve rollback and unload alike. */
 static int layer_lsm_hook_init(void)
 {
     ksu_lsm_hook_init();
+    if (!ksu_lsm_hook_ready()) {
+        pr_err("lsm_hook: the table hook insertion walks is not resolvable on this kernel - refusing to load\n");
+        return -ENOENT;
+    }
     return 0;
 }
 
+/* Layer ids: the load order indexes susfs_layers[] through these, and susfs_load_plan[] below
+ * carries the per-layer FATAL bool passed to susfs_load_layer().  Keep the enum and the table in
+ * the same order. */
+enum susfs_layer_id {
+    /* The branch route is asked first: susfs_fp_hook.c turns the answer into "patch the
+     * table entry" (no RKP) or "route through a branch in the function" (RKP present), and
+     * that must be known before the first entry is installed.  Torn down last, which the
+     * reversed walk gives for free.  NOT fatal: without RKP the direct route still works. */
+    SUSFS_L_RKP_BRANCH = 0,
+    SUSFS_L_FP_HOOK,
+    SUSFS_L_KSU_UMOUNT_GATE,
+    SUSFS_L_KSU_ALLOW_GATE,
+    SUSFS_L_LSM_HOOK,
+    SUSFS_L_SUS_PATH,
+    SUSFS_L_CREATE_GATE,
+    SUSFS_L_OPATH,
+    SUSFS_L_DIRENT,
+    SUSFS_L_UNAME,
+    SUSFS_L_KSTAT,
+    SUSFS_L_SUS_MAP,
+    SUSFS_L_SUS_MOUNT,
+    SUSFS_L_CMDLINE,
+    SUSFS_L_OPEN_REDIRECT,
+    SUSFS_L_ENABLE_LOG,
+    SUSFS_L_AVC_SPOOF,
+    SUSFS_L_SUPERCALL,
+    SUSFS_L_HIDE_SYMS,
+    SUSFS_L_COUNT,
+};
+
 /* Not const: the `armed` flags live here (the pointers must outlive __init too). */
-static struct {
+static struct susfs_layer {
     const char *name;
     int (*init)(void);
     void (*exit)(void);
-    bool fatal;
     bool armed;			/* exit is run for every layer that was attempted */
     bool up;			/* init returned 0 - what /proc/susfs_status reports */
+    int feature;			/* enum susfs_feature armed on a successful init, or -1 */
 } susfs_layers[] = {
-    /* First of all: the branch route has to know whether it is usable before any layer below
-     * installs a table entry, and it is torn down last (susfs_layers_down() walks backwards),
-     * so every branch is restored and the stub page freed after its last user is gone.  Not
-     * fatal: a kernel without RKP simply keeps the direct route. */
-    { "rkp_branch",	susfs_rkp_init,			susfs_rkp_exit,		false, false },
-    /* First, and NOT fatal: this layer only decides whether KernelSU's predicate was found at load.
+    /* Only asks whether the RKP branch-patch helper resolves; nothing is patched here, so a
+     * kernel without RKP simply reports the table route and load carries on. */
+    { "rkp_branch",	susfs_rkp_init,			susfs_rkp_exit,		false, -1 },
+    /* First of the fp-hook layers, and FATAL: every fp-hook layer below (create_gate, opath, dirent, kstat, ...)
+     * installs its entries through this cache.  A module that loaded without it would accept
+     * rules that no fp-hook layer can ever apply - the "loaded but inert" shape this table
+     * exists to avoid - so a missing sys_call_table refuses the load.  The init is idempotent
+     * (the later layers' own susfs_fp_init() calls are no-ops once the cache is set), and
+     * there is no exit: only the pointer is cached, the entries are restored by their owner. */
+    { "fp_hook",	susfs_fp_init,			NULL,			false, -1 },
+    /* NOT fatal: this layer only decides whether KernelSU's predicate was found at load.
      * When it was not, the gates answer the pre-#34 way and every other layer still works - so a
      * failure here is a degradation, not a reason to refuse the module.  Skipping this init entirely
-     * (fail_layer=1) is safe for the same reason: the flag it sets defaults to the pre-#34 answer. */
-    { "ksu_umount_gate", susfs_ksu_umount_gate_init,	susfs_ksu_umount_gate_exit, false, false },
-    { "ksu_allow_gate",	susfs_ksu_allow_gate_init,	NULL,			false, false },
-    { "lsm_hook",	layer_lsm_hook_init,		ksu_lsm_hook_exit,	false, false },
-    { "sus_path",	sus_path_init,			sus_path_exit,		true,  false },
+     * (fail_layer=3) is safe for the same reason: the flag it sets defaults to the pre-#34 answer. */
+    { "ksu_umount_gate", susfs_ksu_umount_gate_init,	NULL,			false, -1 },
+    { "ksu_allow_gate",	susfs_ksu_allow_gate_init,	NULL,			false, -1 },
+    /* FATAL: every LSM layer below (sus_path first) inserts through this file's table hooks.
+     * A module that loads without it would accept rules no LSM layer can apply - the same
+     * "loaded but inert" shape fp_hook is fatal for.  ksu_lsm_hook_init() itself only
+     * reports; the refusal lives here, where a failure can fail the load. */
+    { "lsm_hook",	layer_lsm_hook_init,		ksu_lsm_hook_exit,	false, -1 },
+    { "sus_path",	sus_path_init,			sus_path_exit,		false, SUSFS_FEAT_SUS_PATH },
+    /* After sus_path, whose rule table and per-caller gate it asks.  NOT fatal: when it
+     * cannot arm, the create family keeps answering the kernel's own way (EEXIST for a
+     * hidden name) - the read paths are unaffected. */
+    { "create_gate",	susfs_create_gate_init,		susfs_create_gate_exit,	false, SUSFS_FEAT_SUS_PATH },
     /* After sus_path, because this layer asks sus_path's rule table for every open it
      * post-checks - arming it first would install table entries that answer from a table
      * nobody has filled in yet.  NOT fatal: a failure here only means open(..., O_PATH) keeps
      * answering the pre-layer way (which is what the layer exists to fix, not what makes the
      * module useful), and every entry carries its own reason in the log. */
-    { "opath",		susfs_opath_init,		susfs_opath_exit,	false, false },
+    { "opath",		susfs_opath_init,		susfs_opath_exit,	false, SUSFS_FEAT_SUS_PATH },
     /* After sus_path, whose rule table it asks.  NOT fatal: when it does not arm the
      * post-hoc filter still hides, it is only detectable while doing so. */
-    { "dirent",		susfs_sus_dirent_init,		susfs_sus_dirent_exit,	false, false },
-    { "uname",		susfs_uname_init,		susfs_uname_exit,	false, false },
-    { "kstat",		susfs_kstat_init,		susfs_kstat_exit,	false, false },
+    { "dirent",		susfs_sus_dirent_init,		susfs_sus_dirent_exit,	false, SUSFS_FEAT_SUS_PATH },
+    { "uname",		susfs_uname_init,		susfs_uname_exit,	false, SUSFS_FEAT_SPOOF_UNAME },
+    { "kstat",		susfs_kstat_init,		susfs_kstat_exit,	false, SUSFS_FEAT_SUS_KSTAT },
     /* sus_map MUST stay after kstat.  Both put a probe on show_map_vma - kstat a kretprobe (it
      * rewrites the printed dev:ino), sus_map a kprobe whose pre_handler returns 1 to skip the whole
      * function for a hidden inode.  kprobes aggregates probes on one address and walks the list
@@ -284,14 +336,14 @@ static struct {
      * skip that arrived *after* it would leave the instance allocated forever (the function never
      * returns through the trampoline).  kstat's pool is maxactive=16, and once it is drained its
      * return handler silently stops running.  Reversing these two lines reintroduces exactly that. */
-    { "sus_map",	susfs_sus_map_init,		susfs_sus_map_exit,	false, false },
-    { "sus_mount",	susfs_sus_mount_init,		susfs_sus_mount_exit,	false, false },
-    { "cmdline",	susfs_spoof_cmdline_init,	susfs_spoof_cmdline_exit, false, false },
-    { "open_redirect",	susfs_open_redirect_init,	susfs_open_redirect_exit, false, false },
-    { "enable_log",	susfs_enable_log_init,		susfs_enable_log_exit,	false, false },
-    { "avc_spoof",	susfs_avc_spoof_init,		susfs_avc_spoof_exit,	false, false },
-    { "supercall",	susfs_supercall_init,		susfs_supercall_exit,	true,  false },
-    { "hide_syms",	susfs_hide_syms_init,		susfs_hide_syms_exit,	false, false },
+    { "sus_map",	susfs_sus_map_init,		susfs_sus_map_exit,	false, SUSFS_FEAT_SUS_MAP },
+    { "sus_mount",	susfs_sus_mount_init,		susfs_sus_mount_exit,	false, SUSFS_FEAT_SUS_MOUNT },
+    { "cmdline",	susfs_spoof_cmdline_init,	susfs_spoof_cmdline_exit, false, SUSFS_FEAT_SPOOF_CMDLINE },
+    { "open_redirect",	susfs_open_redirect_init,	susfs_open_redirect_exit, false, SUSFS_FEAT_OPEN_REDIRECT },
+    { "enable_log",	susfs_enable_log_init,		susfs_enable_log_exit,	false, SUSFS_FEAT_ENABLE_LOG },
+    { "avc_spoof",	susfs_avc_spoof_init,		susfs_avc_spoof_exit,	false, SUSFS_FEAT_AVC_SPOOF },
+    { "supercall",	susfs_supercall_init,		susfs_supercall_exit,	false, -1 },
+    { "hide_syms",	susfs_hide_syms_init,		susfs_hide_syms_exit,	false, SUSFS_FEAT_HIDE_SYMS },
 };
 
 /* ---- /proc/susfs_status: the route the table-entry layers took, and which layers are up ----
@@ -358,7 +410,7 @@ static struct proc_dir_entry *susfs_status_entry;
  * layer down first would expose it for the length of the unload. */
 static void susfs_status_node_up(void)
 {
-    if (!susfs_control_visible())
+    if (!susfs_control_node_allowed())
         return;
 
     susfs_status_entry = proc_create("susfs_status", 0777, NULL, &susfs_status_proc_ops);
@@ -377,14 +429,23 @@ static void susfs_status_node_down(void)
 
 /* Diagnostic: make one layer's init fail, by 1-based index, to exercise the rollback path
  * on the device - a `fatal` layer failing must leave the load with nothing armed.
- * `fail_layer=1` skips the ksu_umount_gate init WITHOUT failing the load (that layer is not fatal),
- * which is safe only because its flag defaults to the pre-#34 answer - see ksu_umount_gate.c. */
+ * `fail_layer=3` skips the ksu_umount_gate init WITHOUT failing the load (that layer is not fatal),
+ * which is safe only because its flag defaults to the pre-#34 answer - see ksu_umount_gate.c.
+ *
+ * Index map (keep this list and the fail_layer= references in tools/verify-gki.sh and the layer
+ * comments in sync whenever a layer is inserted):
+ *   1 rkp_branch  2 fp_hook  3 ksu_umount_gate  4 ksu_allow_gate  5 lsm_hook  6 sus_path
+ *   7 create_gate  8 opath  9 dirent  10 uname  11 kstat  12 sus_map  13 sus_mount
+ *   14 cmdline  15 open_redirect  16 enable_log  17 avc_spoof  18 supercall  19 hide_syms
+ */
 static int fail_layer;
 module_param_named(fail_layer, fail_layer, int, 0644);
 
 /* Not __init/__exit: it is called from both, and an __exit callee in __init code is a
  * modpost section mismatch. */
-static void susfs_layers_down(int upto)
+/* noinline: its indirect calls through susfs_layers[] belong to this allow-listed function;
+ * inlined into module_exit they would land in cleanup_module, which the CFI gate does not allow. */
+static noinline void susfs_layers_down(int upto)
 {
     int i;
 
@@ -404,6 +465,69 @@ static void susfs_layers_down(int upto)
      * runs once per teardown, on unload and on a failed load's rollback; the per-layer exits are
      * idempotent and therefore need no barrier of their own. */
     susfs_fp_drain();
+}
+
+/* The load order and the fatal decision live here, not in the table: susfs_load_layer()
+ * receives the bool and owns the rollback-or-warn policy. */
+static const struct {
+    int id;
+    bool fatal;
+} susfs_load_plan[] = {
+    { SUSFS_L_RKP_BRANCH, false },
+    { SUSFS_L_FP_HOOK, true },
+    { SUSFS_L_KSU_UMOUNT_GATE, false },
+    { SUSFS_L_KSU_ALLOW_GATE, false },
+    { SUSFS_L_LSM_HOOK, true },
+    { SUSFS_L_SUS_PATH, true },
+    { SUSFS_L_CREATE_GATE, false },
+    { SUSFS_L_OPATH, false },
+    { SUSFS_L_DIRENT, false },
+    { SUSFS_L_UNAME, false },
+    { SUSFS_L_KSTAT, false },
+    { SUSFS_L_SUS_MAP, false },
+    { SUSFS_L_SUS_MOUNT, false },
+    { SUSFS_L_CMDLINE, false },
+    { SUSFS_L_OPEN_REDIRECT, false },
+    { SUSFS_L_ENABLE_LOG, false },
+    { SUSFS_L_AVC_SPOOF, false },
+    { SUSFS_L_SUPERCALL, true },
+    { SUSFS_L_HIDE_SYMS, false },
+};
+
+static int susfs_load_layer(int id, bool fatal)
+{
+    struct susfs_layer *l;
+    int ret;
+
+    if (id < 0 || id >= SUSFS_L_COUNT) {
+        susfs_layers_down(SUSFS_L_COUNT - 1);
+        return -EINVAL;
+    }
+    l = &susfs_layers[id];
+
+    /* Marked before the call: a layer that half-ran still has to be taken down. */
+    l->armed = true;
+    if (fail_layer == id + 1) {
+        pr_warn("susfs_samsung_lkm: fail_layer=%d - forcing %s's init to fail (diagnostic)\n",
+                fail_layer, l->name);
+        ret = -EIO;
+    } else {
+        ret = l->init ? l->init() : 0;
+    }
+    if (!ret) {
+        l->up = true;
+        if (l->feature >= 0)
+            susfs_supercall_arm_feature(l->feature);
+        return 0;
+    }
+    if (fatal) {
+        pr_err("susfs_samsung_lkm: %s init failed %d, refusing to load\n", l->name, ret);
+        /* The kernel is about to free this module; a hook left behind points into it. */
+        susfs_layers_down(SUSFS_L_COUNT - 1);
+        return ret;
+    }
+    pr_warn("susfs_samsung_lkm: %s init failed %d - that feature stays off\n", l->name, ret);
+    return 0;
 }
 
 static int __init susfs_init(void)
@@ -432,34 +556,24 @@ static int __init susfs_init(void)
     if (ksu_patch_memory_init())
         pr_warn("susfs_samsung_lkm: patching unavailable on this kernel (see patch_memory.c)\n");
 
-    for (i = 0; i < (int)ARRAY_SIZE(susfs_layers); i++) {
+    BUILD_BUG_ON(ARRAY_SIZE(susfs_layers) != SUSFS_L_COUNT);
+    BUILD_BUG_ON(ARRAY_SIZE(susfs_load_plan) != SUSFS_L_COUNT);
+    for (i = 0; i < (int)ARRAY_SIZE(susfs_load_plan); i++) {
+        if (susfs_load_plan[i].id != i) {
+            pr_err("susfs_samsung_lkm: load plan entry %d names layer %d - refusing to load\n",
+                   i, susfs_load_plan[i].id);
+            return -EINVAL;
+        }
+    }
+
+    for (i = 0; i < (int)ARRAY_SIZE(susfs_load_plan); i++) {
         int ret;
 
-        /* Marked before the call: a layer that half-ran still has to be taken down. */
-        susfs_layers[i].armed = true;
-
-        if (fail_layer == i + 1) {
-            pr_warn("susfs_samsung_lkm: fail_layer=%d - forcing %s's init to fail (diagnostic)\n",
-                    fail_layer, susfs_layers[i].name);
-            ret = -EIO;
-        } else {
-            ret = susfs_layers[i].init ? susfs_layers[i].init() : 0;
-        }
-
-        if (!ret) {
-            susfs_layers[i].up = true;
-            continue;
-        }
-
-        if (susfs_layers[i].fatal) {
-            pr_err("susfs_samsung_lkm: %s init failed %d, refusing to load\n",
-                   susfs_layers[i].name, ret);
-            /* The kernel is about to free this module; a hook left behind points into it. */
-            susfs_layers_down(i);
+        ret = susfs_load_layer(susfs_load_plan[i].id, susfs_load_plan[i].fatal);
+        if (ret) {
+            susfs_layers_down(SUSFS_L_COUNT - 1);
             return ret;
         }
-        pr_warn("susfs_samsung_lkm: %s init failed %d - that feature stays off\n",
-                susfs_layers[i].name, ret);
     }
 
     /* Registered last and undone implicitly: these are entries in sus_path's table, which

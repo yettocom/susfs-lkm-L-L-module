@@ -1,6 +1,6 @@
 id=susfs_lkm_loader_lateload
 name=SUSFS LKM Loader L-L
-version=v2.3.0-r18.4
-versionCode=2
+version=v2.3.0-r18.5
+versionCode=3
 author=yettocom; base by inforcqb
 description=[Worldline Shifting...] Late-load SUSFS loader for Samsung RKP-safe.
