@@ -1,68 +1,45 @@
 [中文](README.md)
 
-# susfs4ksu-lkm
+# susfs-lkm-loader L-L
 
-A loadable kernel module (LKM) port of SUSFS: run susfs without recompiling the kernel.
+A loadable kernel module (LKM) port of SUSFS for Samsung RKP/KDP/DEFEX devices: susfs hiding
+without recompiling the kernel, alongside a late-loaded KernelSU.
 
-## Loading
+Based on [inforcqb/susfs4ksu-lkm](https://github.com/inforcqb/susfs4ksu-lkm) ;
+feature source [susfs4ksu](https://gitlab.com/simonpunk/susfs4ksu).
 
-Pick the `.ko` that matches the device kernel, e.g. a 5.15 device uses `susfs_samsung_lkm-android13-5.15.ko`.
+## Usage
 
-**KernelSU devices**:
+Each release provides:
 
-```sh
-ksud insmod /data/adb/loader/susfs_samsung_lkm.ko
-```
+- `susfs_samsung_lkm-<kmi>.ko` -- one per kernel KMI (android13-5.15 / android14-6.1 / android15-6.6)
+- `susfs-lkm-module-<tag>-arm64.zip` -- KernelSU module: flash it in a manager, then **soft reboot**;
+  `late-load.sh` picks the ko for `/proc/sys/kernel/osrelease` and loads it with `expose_proc=1`
+  (loading only, no susfs rules; skipped if susfs is already present). A hard reboot removes both
+  modules - rerun the late-load flow.
 
-**Non-KernelSU devices**: use the `susfs_insmod` loader shipped with the release:
-
-```sh
-susfs_insmod /data/adb/loader/susfs_samsung_lkm.ko
-```
-
-Uninstall:
+Manual load / unload:
 
 ```sh
+insmod susfs_samsung_lkm.ko   # non-KernelSU devices: use the shipped bin/susfs_insmod
 rmmod susfs_samsung_lkm
 ```
 
-## Flashing as a KernelSU module
+The `/proc/susfs_*` control nodes: see [PROC_INTERFACES.en.md](PROC_INTERFACES.en.md).
 
-Each release ships a packaged module `susfs-lkm-module-<tag>-arm64-multi-kmi.zip`: flash it in a
-KernelSU manager, then **soft reboot** (what the manager prefers in late-load mode anyway) or run
-`ksud late-load` once more. The module picks the `.ko` for the device kernel
-(`/proc/sys/kernel/osrelease`), loads it with `expose_proc=1`, applies no susfs rules, and skips if
-susfs is already present. arm64 and KernelSU-compatible managers only.
+## Module status
 
-**It loads in the late-load stage, not in `post-fs-data`.** KernelSU in this fork is late-loaded
-itself, so at post-fs-data there is no KernelSU in the kernel and SUSFS could not ask it for
-`ksu_uid_should_umount` (the hide gates would fall back to the old `uid >= 10000` rule).
-`ksud late-load` stages its daemon, loads kernelsu.ko and only then runs this stage, which is where
-the module's `late-load.sh` runs; `emulated-soft-reboot.sh` reuses the same script on a soft reboot.
-The loader is the module's own `bin/susfs_insmod` rather than `ksud insmod`: `/data/adb/ksud` is a
-shared, mutable file that late-load renames its own daemon over, so only the packaged one is
-provably the loader that was tested.
+The description shown in the manager's module list is the live status (decided by
+`status_refresh()` in `module/lib.sh`):
 
-- **A hard reboot does not activate it**: KernelSU is late-loaded, so after a hard reboot the CVE
-  flow / `ksud late-load` has to run again to bring both modules up.
-- To remove it: disable or remove the module in the manager, which takes effect **after a soft
-  reboot** - the manager runs no script of a disabled module, so a small hook is installed at
-  `/data/adb/post-fs-data.d/susfs-lkm-unload.sh` to `rmmod`; or `rmmod susfs_samsung_lkm` to unload
-  it live.
-- `expose_proc=1` creates the `/proc/susfs_*` control nodes; sus rules are applied through them.
-  `/proc/susfs_status` reports what the module says about itself (which route it took, which layers
-  are up).
-- The "worldline divergence" in the module's `module.prop` description is its current state; the
-  ladder is `status_refresh()` in `module/lib.sh`.
-
-## Interface docs
-
-All `/proc` control nodes: see **[PROC_INTERFACES.en.md](PROC_INTERFACES.en.md)**.
+| Status | Meaning |
+|---|---|
+| `Worldline Shifting...` | disabled / pending removal; or installed but never activated |
+| `< 0%` | a load was attempted and did not take; or the ko is in the kernel with zero layers armed |
+| `1.0485%` | partially armed; or status unreadable |
+| `1.048596%` | fully armed on the branch route |
+| `1.130205%` | fully armed on the table route |
 
 ## License
 
-GPL-2.0, see [LICENSE](LICENSE). Ported from: [susfs4ksu](https://gitlab.com/simonpunk/susfs4ksu) (feature logic and hook points), [SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra) (`patch_memory` / `lsm_hook` / `symbol_resolver`).
-
-## Disclaimer
-
-For technical research and study only. Use at your own risk.
+GPL-3.0. For technical research and study only, use at your own risk.
