@@ -26,6 +26,25 @@ rmmod susfs_samsung_lkm
 
 `/proc/susfs_*` 控制节点见 [PROC_INTERFACES.md](PROC_INTERFACES.md)。
 
+## Changes in v2.3.0-r18.6
+
+Rebased on upstream [v2.3.0-r18.6](https://github.com/inforcqb/susfs4ksu-for-lkm/releases/tag/v2.3.0-r18.6)
+(`6020cd5b`): the Samsung delta is now upstream code plus glue — five files of our own, no upstream
+logic rewritten.
+
+- 8-byte function-pointer slot writes now survive RKP: `ksu_patch_text()` routes them to the branch
+  patcher (the same design as our KernelSU fork), so `sus_map` and `hide_syms` actually work on a
+  Samsung kernel instead of silently doing nothing.
+- Fixed a panic on kernels built with `-mbranch-protection=standard`: the `bti c; paciasp` preamble
+  was skipped as a whole, which left an unpaired `PACIASP` on the patched entry. Only one landing-pad
+  instruction is skipped now, and the skipped `PAC` is replayed by the stub.
+- Slot targets are validated with `kernel_text_address()` before patching, and `rkp_armed` is
+  re-checked under the site lock, so a call racing module exit can no longer publish a stub into a
+  page that was already freed.
+- `tools/verify-lsm-shape.sh` asserts the LSM carrier shape and the two guards above.
+
+Per-file reasoning, the full upstream-vs-ours delta and the hashes: [SAMSUNG.md](SAMSUNG.md).
+
 ## 模块状态
 
 管理器模块列表里 `module.prop` 的描述显示当前状态（判定逻辑在 `module/lib.sh` 的 `status_refresh()`）：
