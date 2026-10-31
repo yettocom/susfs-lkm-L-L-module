@@ -43,8 +43,6 @@ logic rewritten.
   page that was already freed.
 - `tools/verify-lsm-shape.sh` asserts the LSM carrier shape and the two guards above.
 
-Per-file reasoning, the full upstream-vs-ours delta and the hashes: [SAMSUNG.md](SAMSUNG.md).
-
 ## 模块状态
 
 管理器模块列表里 `module.prop` 的描述显示当前状态（判定逻辑在 `module/lib.sh` 的 `status_refresh()`）：
