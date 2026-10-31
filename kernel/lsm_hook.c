@@ -919,8 +919,12 @@ static void susfs_lsm_kprobe_remove(struct ksu_lsm_hook *hook)
 }
 #endif /* SUSFS_SAMSUNG_NO_PATCH_TEXT */
 
-static int ksu_lsm_hook_patch(struct ksu_lsm_hook *hook)
+
+int ksu_lsm_hook(struct ksu_lsm_hook *hook)
 {
+#if SUSFS_SAMSUNG_NO_PATCH_TEXT
+    return susfs_lsm_kprobe_install(hook);
+#else
     int ret = 0;
     struct security_hook_list *entry;
     void *target;
@@ -1266,19 +1270,18 @@ out_untrack:
 out_unlock:
     mutex_unlock(&ksu_lsm_hook_lock);
     return ret;
-}
-
-int ksu_lsm_hook(struct ksu_lsm_hook *hook)
-{
-#if SUSFS_SAMSUNG_NO_PATCH_TEXT
-    return susfs_lsm_kprobe_install(hook);
-#else
-    return ksu_lsm_hook_patch(hook);
 #endif
 }
 
-static void ksu_lsm_unhook_patch(struct ksu_lsm_hook *hook)
+
+void ksu_lsm_unhook(struct ksu_lsm_hook *hook)
 {
+#if SUSFS_SAMSUNG_NO_PATCH_TEXT
+    susfs_lsm_kprobe_remove(hook);
+    /* unregister_kprobe() stops new calls but does not wait for a pre_handler already
+     * running on another CPU, so drain before this module's text may go away. */
+    ksu_lsm_hook_drain();
+#else
     void **slot;
     mutex_lock(&ksu_lsm_hook_lock);
 
@@ -1348,17 +1351,6 @@ static void ksu_lsm_unhook_patch(struct ksu_lsm_hook *hook)
      * other hook operation, while the node/slot is already unlinked above and only a task
      * already inside the replacement can still be there. */
     ksu_lsm_hook_drain();
-}
-
-void ksu_lsm_unhook(struct ksu_lsm_hook *hook)
-{
-#if SUSFS_SAMSUNG_NO_PATCH_TEXT
-    susfs_lsm_kprobe_remove(hook);
-    /* unregister_kprobe() stops new calls but does not wait for a pre_handler already
-     * running on another CPU, so drain before this module's text may go away. */
-    ksu_lsm_hook_drain();
-#else
-    ksu_lsm_unhook_patch(hook);
 #endif
 }
 

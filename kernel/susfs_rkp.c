@@ -313,7 +313,7 @@ int susfs_rkp_branch_patch_callthru(void *dst, void *src, void **callthru)
      * clobber the landing pad: an indirect call arrives with BLR, and a function whose
      * fn+0 no longer takes that call raises a BTI violation instead of running. */
     preamble_skip = 0;
-    while (preamble_skip < 2 && susfs_arm64_is_landing_pad(displaced)) {
+    while (preamble_skip < 2 && susfs_arm64_insn_is_landing_pad(displaced)) {
         preamble_skip++;
         displaced = *(u32 *)((u8 *)fn + preamble_skip * 4);
     }
