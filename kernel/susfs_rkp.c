@@ -78,6 +78,10 @@ struct rkp_site {
 };
 
 static susfs_rkp_insn_patch_t rkp_insn_patch;
+/* kernel_text_address(), optional: it is what keeps an 8-byte slot write from being
+ * treated as a function when the slot really holds data.  A kernel without it only
+ * loses the check, never the route - see susfs_rkp_branch_patch_callthru(). */
+static bool (*rkp_kernel_text)(unsigned long addr);
 static struct rkp_site rkp_sites[SUSFS_RKP_MAX_SITES];
 static unsigned int rkp_site_count;
 static DEFINE_MUTEX(rkp_site_lock);
@@ -254,7 +258,24 @@ int susfs_rkp_branch_patch_callthru(void *dst, void *src, void **callthru)
 	if (!fn || !new_fn)
 		return -EINVAL;
 
+	/* ksu_patch_text() forwards any 8-byte write here, so the slot's target is only known
+	 * at run time.  A data address would be read as a function pointer and then patched as
+	 * if its first word were an instruction.  kernel_text_address() is the kernel's own
+	 * predicate for this and is resolved optionally (see susfs_rkp_init()). */
+	if (rkp_kernel_text && !rkp_kernel_text((unsigned long)fn)) {
+		pr_err("rkp: %pS is not kernel text, not installing\n", fn);
+		return -EINVAL;
+	}
+
 	mutex_lock(&rkp_site_lock);
+
+	/* susfs_rkp_exit() frees the stub page and then clears the flag, both under this lock,
+	 * so a caller that passed the unlocked check above has to look again: it would
+	 * otherwise publish a stub pointer into a page that is already gone. */
+	if (!READ_ONCE(rkp_armed)) {
+		mutex_unlock(&rkp_site_lock);
+		return -EOPNOTSUPP;
+	}
 
 	site = susfs_rkp_find_site(fn);
 	if (site) {
@@ -440,6 +461,12 @@ int susfs_rkp_init(void)
 		SUSFS_LOGI("rkp: no RKP on this kernel, the direct route is used\n");
 		return 0;
 	}
+
+	/* Optional: ksu_patch_text() forwards any 8-byte write here, so the slot's target is
+	 * only known at run time (see susfs_rkp_branch_patch_callthru()). */
+	rkp_kernel_text = (bool (*)(unsigned long))find_kernel_symbol_exact("kernel_text_address");
+	if (!rkp_kernel_text)
+		SUSFS_LOGI("rkp: kernel_text_address is not reachable, slot targets are not checked\n");
 
 	WRITE_ONCE(rkp_armed, true);
 	SUSFS_LOGI("rkp: RKP detected, function slots are served by branch patching\n");
