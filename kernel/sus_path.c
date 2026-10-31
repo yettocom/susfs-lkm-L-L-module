@@ -2711,12 +2711,12 @@ int sus_path_add_hidden(const char *path)
  * would disagree with each other. */
 bool sus_path_lsm_active(void)
 {
-	/* ksu_lsm_hook_armed(), not `.entry`: the Samsung build installs these as kprobes and never
+	/* susfs_lsm_hook_armed(), not `.entry`: the Samsung build installs these as kprobes and never
 	 * sets `entry`, so testing the field would leave this false, susfs_control_node_allowed()
 	 * would then refuse every /proc/susfs_* node, and the module would load with no control
 	 * surface at all. */
-	return ksu_lsm_hook_armed(&sus_path_getattr_hook) &&
-	       ksu_lsm_hook_armed(&sus_path_perm_hook);
+	return susfs_lsm_hook_armed(&sus_path_getattr_hook) &&
+	       susfs_lsm_hook_armed(&sus_path_perm_hook);
 }
 
 int sus_path_init(void)
@@ -2781,7 +2781,7 @@ int sus_path_init(void)
         return rc;
     }
     SUSFS_LOGI("sus_path: getattr hook inserted ahead of the chain (node %px)\n",
-            ksu_lsm_hook_target(&sus_path_getattr_hook));
+            susfs_lsm_hook_target(&sus_path_getattr_hook));
 
     rc = ksu_register_lsm_hook(&sus_path_perm_hook);
     if (rc) {
@@ -2792,7 +2792,7 @@ int sus_path_init(void)
         return rc;
     }
     SUSFS_LOGI("sus_path: perm hook inserted ahead of the chain (node %px)\n",
-            ksu_lsm_hook_target(&sus_path_perm_hook));
+            susfs_lsm_hook_target(&sus_path_perm_hook));
 
     /* Name-based and metadata operations: without these an app that can write the parent directory
      * can delete or rename a hidden file, and a hidden file can still be probed or modified through
@@ -2822,7 +2822,7 @@ int sus_path_init(void)
                         extra[i]->head_name, rc);
             } else {
                 SUSFS_LOGI("sus_path: %s hook inserted ahead of the chain (node %px)\n",
-                        extra[i]->head_name, ksu_lsm_hook_target(extra[i]));
+                        extra[i]->head_name, susfs_lsm_hook_target(extra[i]));
             }
         }
         if (n_lsm_ext_fail)
@@ -2907,7 +2907,7 @@ void sus_path_exit(void)
     mutex_unlock(&sus_path_pending_lock);
     /* No walk can be in flight now, so the borrowed creds are ours to release. */
     sus_path_drop_caller_cred();
-    if (ksu_lsm_hook_armed(&sus_path_perm_hook))
+    if (susfs_lsm_hook_armed(&sus_path_perm_hook))
         ksu_unregister_lsm_hook(&sus_path_perm_hook);
     {
         struct ksu_lsm_hook *extra[] = {
@@ -2922,11 +2922,11 @@ void sus_path_exit(void)
         int i;
 
         for (i = 0; i < (int)ARRAY_SIZE(extra); i++) {
-            if (ksu_lsm_hook_armed(extra[i]))
+            if (susfs_lsm_hook_armed(extra[i]))
                 ksu_unregister_lsm_hook(extra[i]);
         }
     }
-    if (ksu_lsm_hook_armed(&sus_path_getattr_hook))
+    if (susfs_lsm_hook_armed(&sus_path_getattr_hook))
         ksu_unregister_lsm_hook(&sus_path_getattr_hook);
 
     kvfree(dirent_tmp);

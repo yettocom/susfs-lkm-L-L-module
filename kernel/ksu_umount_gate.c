@@ -74,7 +74,7 @@ static bool susfs_ksu_umount_gate_nb_registered;
  * susfs_ksu_umount_ask() is reached from kprobe handlers as well as from process context, and
  * KernelSU's predicate is rcu_read_lock() + kref_get_unless_zero() + kfree_rcu() - no mutex (the
  * allowlist mutex is write-side only). */
-bool __nocfi noinline susfs_ksu_umount_ask(uid_t uid)
+bool noinline __nocfi susfs_ksu_umount_ask(uid_t uid)
 {
 	bool (*fn)(uid_t);
 	bool answer;

@@ -10,6 +10,7 @@
 #include "patch_memory.h"
 #include "susfs_log.h"
 #include "symbol_resolver.h"
+#include "susfs_rkp.h"
 #include <linux/cpumask.h>
 #include <linux/gfp.h>
 #include <linux/uaccess.h>
@@ -177,22 +178,16 @@ static int ksu_patch_text_cb(void *arg)
     return ret;
 }
 
-#if SUSFS_SAMSUNG_NO_PATCH_TEXT
 /* Samsung RKP: the pages this would write (kernel text, and the rodata holding the LSM hook
- * list and sys_call_table) are protected at EL2.  The fixmap mapping in
- * ksu_patch_text_nosync() replaces only the stage-1 attributes, so the stage-2 permission
- * still applies to the physical page and the store takes an EL2 fault - measured on Exynos
- * as a hard panic, not a failed write.  Refuse here instead, so a caller that was not gated
- * degrades to "no hook" rather than taking the device down. */
-int ksu_patch_text(void *dst, void *src, size_t len, int flags)
-{
-    /* Every parameter is reported, `src` included: a refused write is diagnosed from this line
-     * alone, and an unused parameter is what MISRA C++ 0-1-11 flags. */
-    pr_warn("patch_text disabled for this Samsung target: dst=0x%lx src=0x%lx len=%zu flags=0x%x\n",
-            (unsigned long)dst, (unsigned long)src, len, flags);
-    return -EOPNOTSUPP;
-}
-#else
+ * list and sys_call_table) are protected at EL2.  The fixmap mapping in ksu_patch_text_nosync()
+ * replaces only the stage-1 attributes, so the stage-2 permission still applies to the physical
+ * page and the store takes an EL2 fault - measured on Exynos as a hard panic, not a failed write.
+ *
+ * One shape still works there, and it is the one most callers use: an 8-byte function-pointer
+ * slot.  It is not written at all - the function the slot points at gets a branch instead - so the
+ * slot stays read-only and every caller, the table included, reaches the replacement.  This is the
+ * forwarding the KernelSU tree does in its own patch_memory.c, which is where this file came from,
+ * and keeping it here is what lets the callers above stay untouched on a Samsung target. */
 int ksu_patch_text(void *dst, void *src, size_t len, int flags)
 {
     struct patch_text_info info = {
@@ -202,9 +197,28 @@ int ksu_patch_text(void *dst, void *src, size_t len, int flags)
         .cpu_count = ATOMIC_INIT(0),
         .flags = flags,
     };
+
+    if (susfs_rkp_active()) {
+        if (len == sizeof(void *))
+            return susfs_rkp_branch_patch(dst, src);
+        /* Only a function-pointer slot has a route here; anything else takes the EL2 fault. */
+        pr_warn("patch_text: refusing a %zu-byte write on an RKP target: dst=0x%lx flags=0x%x\n",
+                len, (unsigned long)dst, flags);
+        return -EOPNOTSUPP;
+    }
+
     return stop_machine(ksu_patch_text_cb, &info, cpu_online_mask);
 }
-#endif
+
+/* See patch_memory.h.  The out-parameter exists because only the caller knows where it saved the
+ * original pointer; the router above has nowhere to publish the stub. */
+int susfs_patch_text_slot(void *dst, void *src, void **callthru)
+{
+    if (susfs_rkp_active())
+        return susfs_rkp_branch_patch_callthru(dst, src, callthru);
+
+    return ksu_patch_text(dst, src, sizeof(void *), KSU_PATCH_TEXT_FLUSH_DCACHE);
+}
 
 /* Scan [start, start+size) for a BL whose target equals `target`; returns the first match, or NULL. */
 void *scan_call_to(void *start, size_t size, void *target)

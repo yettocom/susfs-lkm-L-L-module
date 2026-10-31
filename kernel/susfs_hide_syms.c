@@ -843,8 +843,7 @@ int susfs_hide_syms_init(void)
 	orig_s_show = image;
 	kallsyms_op_target = op;
 	smp_wmb();
-	if (ksu_patch_text((void *)&op->show, &wrapper, sizeof(wrapper),
-			   KSU_PATCH_TEXT_FLUSH_DCACHE)) {
+	if (susfs_patch_text_slot((void *)&op->show, &wrapper, (void **)&orig_s_show)) {
 		pr_warn("susfs_hide_syms: cannot replace kallsyms s_show\n");
 		kallsyms_op_target = NULL;
 		orig_s_show = NULL;
@@ -865,8 +864,7 @@ int susfs_hide_syms_init(void)
 		orig_m_show = image;
 		modules_op_target = op;
 		smp_wmb();
-		if (ksu_patch_text((void *)&op->show, &wrapper, sizeof(wrapper),
-				   KSU_PATCH_TEXT_FLUSH_DCACHE)) {
+		if (susfs_patch_text_slot((void *)&op->show, &wrapper, (void **)&orig_m_show)) {
 			pr_warn("susfs_hide_syms: cannot replace modules m_show\n");
 			modules_op_target = NULL;
 			orig_m_show = NULL;

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef __SUSFS_ARM64_H
 #define __SUSFS_ARM64_H
 
@@ -36,7 +37,7 @@ static inline bool susfs_arm64_is_pac(u32 insn)
  * (fp_has_landing_pad() in susfs_fp_hook.c).  A mask would also accept plain `bti` and
  * `bti j`: those are jump targets, not call targets, and a BLR onto one raises a
  * branch-type exception on a BTI kernel. */
-static inline bool susfs_arm64_is_landing_pad(u32 insn)
+static inline bool susfs_arm64_insn_is_landing_pad(u32 insn)
 {
 	switch (insn) {
 	case SUSFS_ARM64_BTI_C:
@@ -50,7 +51,7 @@ static inline bool susfs_arm64_is_landing_pad(u32 insn)
 /* The same test against the word at a function's entry, without dereferencing NULL. */
 static inline bool susfs_arm64_fn_has_landing_pad(const void *fn)
 {
-	return fn && susfs_arm64_is_landing_pad(READ_ONCE(*(const u32 *)fn));
+	return fn && susfs_arm64_insn_is_landing_pad(READ_ONCE(*(const u32 *)fn));
 }
 
 #endif /* __SUSFS_ARM64_H */

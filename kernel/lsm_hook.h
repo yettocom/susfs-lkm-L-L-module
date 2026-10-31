@@ -23,7 +23,7 @@ struct ksu_lsm_hook;
  * (through its exact LSM type, so kCFI is satisfied) and answers what the dispatcher should
  * return, 0 meaning "no opinion, run the real chain".  Defined next to the replacement it
  * calls - sus_path.c - because that is the only place the exact type is in scope. */
-typedef int (*ksu_lsm_kprobe_fn)(struct ksu_lsm_hook *hook, struct pt_regs *regs);
+typedef int (*susfs_lsm_kprobe_fn)(struct ksu_lsm_hook *hook, struct pt_regs *regs);
 #endif
 
 struct ksu_lsm_hook {
@@ -39,7 +39,7 @@ struct ksu_lsm_hook {
      * `security_<member>()` dispatcher instead of by rewriting the hook list, so the
      * object carries the probe and its decision function.  See lsm_hook.c. */
     struct kprobe kp;
-    ksu_lsm_kprobe_fn kprobe_fn;
+    susfs_lsm_kprobe_fn kprobe_fn;
 #endif
     /* true = INSERT our own hook instead of overwriting the slot of an entry resolved by
      * symbol name (see lsm_hook.c).  Nothing is resolved by name, so target_name stays
@@ -113,7 +113,7 @@ void ksu_lsm_unhook(struct ksu_lsm_hook *hook);
  * fields - the hook list / static-call path sets `entry`, the Samsung kprobe path sets the
  * probe's `addr` - so callers that tear a set of hooks down ask here instead of testing one
  * of them and silently skipping the other build's hooks. */
-static inline bool ksu_lsm_hook_armed(const struct ksu_lsm_hook *hook)
+static inline bool susfs_lsm_hook_armed(const struct ksu_lsm_hook *hook)
 {
 #if SUSFS_SAMSUNG_NO_PATCH_TEXT
     return hook->kp.addr != NULL;
@@ -124,7 +124,7 @@ static inline bool ksu_lsm_hook_armed(const struct ksu_lsm_hook *hook)
 
 /* The address this hook is actually installed at, for logs: the probed dispatcher on the
  * Samsung kprobe path, the hook-list node (or patched slot) on the other. */
-static inline const void *ksu_lsm_hook_target(const struct ksu_lsm_hook *hook)
+static inline const void *susfs_lsm_hook_target(const struct ksu_lsm_hook *hook)
 {
 #if SUSFS_SAMSUNG_NO_PATCH_TEXT
     return (const void *)hook->kp.addr;

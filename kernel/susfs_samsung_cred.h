@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef __SUSFS_SAMSUNG_CRED_H
 #define __SUSFS_SAMSUNG_CRED_H
 
