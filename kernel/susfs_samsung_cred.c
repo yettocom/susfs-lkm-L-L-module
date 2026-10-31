@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * susfs_samsung_cred.c - credential references through Samsung's KDP helpers.
  *

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 #ifndef __SUSFS_RKP_H
 #define __SUSFS_RKP_H
 
