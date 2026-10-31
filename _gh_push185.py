@@ -19,7 +19,7 @@ ASSETS = [
 ]
 # Published source trees. Any tracked file here that the remote lacks is added.
 PUB_TREES = ('kernel/', 'module/', 'tools/', 'bin/')
-PUB_EXTRA = ('SAMSUNG.md',)
+PUB_EXTRA = ()  # internal notes stay unpublished (see _gh_push186.py INTERNAL)
 # Repo-owned docs: this working tree drifts back to upstream's copies (the upstream
 # LICENSE is GPL-2.0 while the repo is GPL-3.0), so never replay them over main.
 KEEP_REMOTE = ('LICENSE', 'README.md', 'README.en.md')
