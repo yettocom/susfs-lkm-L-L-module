@@ -876,8 +876,8 @@ static void sus_map_arm_show_wrappers(void)
 			sus_map_maps_op = op;
 			sus_map_orig_show = orig;
 			smp_wmb();
-			if (!ksu_patch_text((void *)&op->show, &wrap, sizeof(wrap),
-					    KSU_PATCH_TEXT_FLUSH_DCACHE)) {
+			if (!susfs_patch_text_slot((void *)&op->show, &wrap,
+						   (void **)&sus_map_orig_show)) {
 				sus_map_show_armed = true;
 				SUSFS_LOGI("sus_map: show_map replaced at %px (original %px)\n",
 					   (void *)&op->show, (void *)orig);
@@ -900,8 +900,8 @@ static void sus_map_arm_show_wrappers(void)
 			sus_map_smaps_op = op;
 			sus_map_orig_smap = orig;
 			smp_wmb();
-			if (!ksu_patch_text((void *)&op->show, &wrap, sizeof(wrap),
-					    KSU_PATCH_TEXT_FLUSH_DCACHE)) {
+			if (!susfs_patch_text_slot((void *)&op->show, &wrap,
+						   (void **)&sus_map_orig_smap)) {
 				sus_map_smap_armed = true;
 				SUSFS_LOGI("sus_map: show_smap replaced at %px (original %px)\n",
 					   (void *)&op->show, (void *)orig);

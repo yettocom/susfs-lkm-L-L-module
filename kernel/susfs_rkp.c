@@ -211,6 +211,17 @@ static int susfs_rkp_ensure_stub_page(void)
     return ret;
 }
 
+/* The callable entry a site published: 4 bytes into its frame, past the backup of the
+ * displaced instruction.  One definition, because the restore check and get_stub() must agree
+ * on it exactly. */
+static void *rkp_site_stub(const struct rkp_site *site)
+{
+    if (!site || !rkp_stub_page || site->stub_idx >= SUSFS_RKP_STUBS_PER_PAGE)
+        return NULL;
+
+    return (u8 *)rkp_stub_page + site->stub_idx * SUSFS_RKP_STUB_SIZE + 4;
+}
+
 /*
  * Replace the function @dst points at with the function @src points at.
  *
@@ -231,6 +242,7 @@ int susfs_rkp_branch_patch_callthru(void *dst, void *src, void **callthru)
     u32 landing;
     u32 branch;
     unsigned int preamble_skip;
+    bool restoring;
     int ret;
 
     if (!rkp_armed || !dst || !src)
@@ -245,6 +257,11 @@ int susfs_rkp_branch_patch_callthru(void *dst, void *src, void **callthru)
 
     site = susfs_rkp_find_site(fn);
     if (site) {
+        /* Handing back the stub this site published is a restore, not a retarget: a caller that
+         * restores through ksu_patch_text() passes whatever it saved, and on this route what it
+         * saved is the stub.  Read before the site slot is overwritten below. */
+        restoring = new_fn == fn || new_fn == rkp_site_stub(site);
+
         ret = susfs_rkp_restore_site(site);
         if (ret) {
             mutex_unlock(&rkp_site_lock);
@@ -253,7 +270,7 @@ int susfs_rkp_branch_patch_callthru(void *dst, void *src, void **callthru)
 
         *site = rkp_sites[--rkp_site_count];
         SUSFS_LOGI("rkp: branch site at %pS removed\n", fn);
-        if (new_fn == fn) {
+        if (restoring) {
             mutex_unlock(&rkp_site_lock);
             return 0;
         }
@@ -394,7 +411,7 @@ void *susfs_rkp_get_stub(void *fn)
     mutex_lock(&rkp_site_lock);
     site = susfs_rkp_find_site(fn);
     if (site && rkp_stub_page)
-        stub = (u8 *)rkp_stub_page + site->stub_idx * SUSFS_RKP_STUB_SIZE + 4;
+        stub = rkp_site_stub(site);
     mutex_unlock(&rkp_site_lock);
 
     return stub;
