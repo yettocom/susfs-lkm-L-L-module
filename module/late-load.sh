@@ -82,7 +82,11 @@ esac
 # prove it, and a foreign or stale ksud would load the module with a loader we did not build.  This
 # binary comes from the package and can also rewrite a vermagic the kernel refused (the
 # ALLOW_RELEASE_MISMATCH case above), which ksud's insmod cannot.
-"$MODDIR/bin/susfs_insmod" "$LKM" expose_proc=1
+# owner_nonce= names the instance that owns this ko, by module id (`${MODDIR##*/}`), and
+# /proc/susfs_status echoes it back.  The id and not the path: `$0`-derived paths differ between
+# a direct call, a sourced file and the post-fs-data.d trampoline, and lib.sh's unload compares
+# this value before it rmmod's anything - a path mismatch would make "disable" unload nothing.
+"$MODDIR/bin/susfs_insmod" "$LKM" expose_proc=1 owner_nonce="${MODDIR##*/}"
 RESULT=$?
 [ "$RESULT" = "0" ] || { echo "susfs_insmod failed: $RESULT"; exit "$RESULT"; }
 echo "Loaded via susfs_insmod"

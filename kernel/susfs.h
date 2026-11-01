@@ -149,6 +149,20 @@ void susfs_supercall_exit(void);
  * through the kprobe fallback (see susfs_supercall_init()). */
 bool susfs_supercall_kprobe_active(void);
 
+/* A carrier that refused to install is invisible in the layer table: the layer still reports
+ * up, so /proc/susfs_status has to name the one that declined and the errno it got.  One
+ * place records them (susfs_fp_hook.c, lsm_hook.c), one node prints them. */
+void susfs_note_denied(const char *what, int err);
+unsigned int susfs_denied_count(void);
+const char *susfs_denied_last(void);
+int susfs_denied_last_err(void);
+
+/* `owner_nonce=` on the load line: which userspace instance loaded this ko.  Diagnostic -
+ * the module name already refuses a second load - so it answers "who may unload me", not
+ * "may you load me".  Reported by /proc/susfs_status. */
+#define SUSFS_OWNER_NONCE_LEN 128
+extern char susfs_owner_nonce[SUSFS_OWNER_NONCE_LEN];
+
 /* Feature registry for the reboot(2) supercall.  A layer arms its feature only after its init
  * returned 0, so a non-fatal layer that failed is neither advertised by SHOW_ENABLED_FEATURES
  * nor allowed to have its commands hijacked (userspace then keeps its ERR_CMD_NOT_SUPPORTED

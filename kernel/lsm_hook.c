@@ -39,6 +39,7 @@
 #include "lsm_hook.h"
 #include "patch_memory.h"
 #include "susfs_log.h"
+#include "susfs.h"	/* susfs_note_denied() */
 #if SUSFS_SAMSUNG_NO_PATCH_TEXT
 #include <linux/ptrace.h>
 #include <linux/kallsyms.h>	/* KSYM_SYMBOL_LEN, to name the probed dispatcher */
@@ -859,7 +860,7 @@ static int susfs_lsm_kprobe_pre(struct kprobe *p, struct pt_regs *regs)
     return 1;
 }
 
-static int susfs_lsm_kprobe_install(struct ksu_lsm_hook *hook)
+static int lsm_kprobe_install_one(struct ksu_lsm_hook *hook)
 {
     char sym[KSYM_SYMBOL_LEN];
     unsigned long addr;
@@ -905,6 +906,17 @@ static int susfs_lsm_kprobe_install(struct ksu_lsm_hook *hook)
     SUSFS_LOGI("lsm_hook: %s: kprobe on %s (%px), replacement %px\n",
             hook->head_name, sym, (void *)addr, hook->replacement);
     return 0;
+}
+
+/* Same shape as the fp-hook wrapper: a refused dispatcher leaves no layer down, so it is
+ * recorded here and printed by /proc/susfs_status. */
+static int susfs_lsm_kprobe_install(struct ksu_lsm_hook *hook)
+{
+    int ret = lsm_kprobe_install_one(hook);
+
+    if (ret)
+        susfs_note_denied(hook && hook->head_name ? hook->head_name : "lsm", ret);
+    return ret;
 }
 
 static void susfs_lsm_kprobe_remove(struct ksu_lsm_hook *hook)

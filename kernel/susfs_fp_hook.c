@@ -42,6 +42,7 @@
 #include "symbol_resolver.h"
 #include "susfs_log.h"
 #include "susfs_fp_hook.h"
+#include "susfs.h"	/* susfs_note_denied() */
 #include "susfs_rkp.h"
 #include "susfs_arm64.h"	/* the landing-pad test */
 
@@ -223,7 +224,7 @@ void susfs_fp_dump_wrapper(const char *name, const void *fn)
 		susfs_arm64_fn_has_landing_pad(fn) ? "CALL LANDING PAD" : "NO LANDING PAD");
 }
 
-int susfs_fp_install(struct susfs_fp_hook *h)
+static int fp_install_one(struct susfs_fp_hook *h)
 {
 	susfs_syscall_fn_t old;
 	int cnr, err;
@@ -328,6 +329,17 @@ int susfs_fp_install(struct susfs_fp_hook *h)
 		h->nr, cnr, h->name, h->nr >= 0 ? (void *)&sys_call_table_ptr[h->nr] : NULL,
 		(void *)h->wrapper, (void *)h->orig, (void *)h->orig_compat);
 	return 0;
+}
+
+/* Every refusal above returns through here, so the counter cannot fall out of step with the
+ * pr_warn lines - a note at the call sites would miss the early returns. */
+int susfs_fp_install(struct susfs_fp_hook *h)
+{
+	int err = fp_install_one(h);
+
+	if (err)
+		susfs_note_denied(h->name, err);
+	return err;
 }
 
 void susfs_fp_remove(struct susfs_fp_hook *h)

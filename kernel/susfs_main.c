@@ -358,6 +358,39 @@ static struct susfs_layer {
  * `armed` flag: that one means "exit must run", is set before the call and stays set for a layer
  * that failed, so it would report a full module on a kernel where every layer declined.
  */
+/* Refusal accounting, filled by the carrier wrappers and printed below.  A pointer to the
+ * literal name is stored instead of a copy, so a reader can never see a half-written string
+ * and nothing has to be freed on unload. */
+static const char *susfs_denied_what __read_mostly;
+static int susfs_denied_err __read_mostly;
+static unsigned int susfs_denied_total __read_mostly;
+
+char susfs_owner_nonce[SUSFS_OWNER_NONCE_LEN];
+module_param_string(owner_nonce, susfs_owner_nonce, sizeof(susfs_owner_nonce), 0444);
+MODULE_PARM_DESC(owner_nonce, "userspace instance that loaded this module; /proc/susfs_status reports it");
+
+void susfs_note_denied(const char *what, int err)
+{
+    WRITE_ONCE(susfs_denied_total, READ_ONCE(susfs_denied_total) + 1);
+    WRITE_ONCE(susfs_denied_err, err);
+    WRITE_ONCE(susfs_denied_what, what);
+}
+
+unsigned int susfs_denied_count(void)
+{
+    return READ_ONCE(susfs_denied_total);
+}
+
+const char *susfs_denied_last(void)
+{
+    return READ_ONCE(susfs_denied_what);
+}
+
+int susfs_denied_last_err(void)
+{
+    return READ_ONCE(susfs_denied_err);
+}
+
 static int susfs_status_proc_show(struct seq_file *m, void *v)
 {
     int i, up = 0;
@@ -381,6 +414,11 @@ static int susfs_status_proc_show(struct seq_file *m, void *v)
      * (susfs_fp_hook.c), so it cannot differ between layers. */
     seq_printf(m, "route=%s\n", susfs_rkp_active() ? "branch" : "table");
     seq_printf(m, "total=%d armed=%d\n", (int)ARRAY_SIZE(susfs_layers), up);
+    /* A carrier that declined leaves its layer `up`, so the counters above cannot show it;
+     * denied/last_denied are that answer, and owner= is the instance that loaded this ko. */
+    seq_printf(m, "denied=%u last_denied=%s:%d\n", susfs_denied_count(),
+           susfs_denied_last() ?: "none", susfs_denied_last_err());
+    seq_printf(m, "owner=%s\n", susfs_owner_nonce[0] ? susfs_owner_nonce : "none");
     for (i = 0; i < (int)ARRAY_SIZE(susfs_layers); i++)
         seq_printf(m, "layer %s %s\n", susfs_layers[i].name, susfs_layers[i].up ? "up" : "down");
     return 0;

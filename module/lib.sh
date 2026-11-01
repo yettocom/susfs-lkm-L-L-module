@@ -91,7 +91,21 @@ set_status() {
     chmod 644 "$tmp" && mv -f "$tmp" "$p"
 }
 
+# Only remove the instance THIS module loaded.  The ko echoes back the `owner_nonce=` it was
+# loaded with, and that value is the module id (`${MODDIR##*/}`), not the path: `$0`-derived
+# paths differ between a direct call, a sourced file and the post-fs-data.d trampoline, and a
+# mismatch there would silently turn "disable" into "does nothing".  A ko loaded by another kit
+# or by hand reports a different id (or none), and the module name alone cannot tell the two apart.
 unload() {
+  # The id the ko was handed on its load line; falling back to this call's own MODDIR keeps the
+  # trampoline and uninstall.sh working without changes.  Empty id or an unset MODDIR means we
+  # cannot tell who loaded it, and then the old unconditional rmmod is the safer behaviour.
+  me=${MODDIR_BASENAME:-${MODDIR##*/}}
+  owner=$(sed -n 's/^owner=//p' /proc/susfs_status 2>/dev/null)
+  if [ -n "$me" ] && [ -n "$owner" ] && [ "$owner" != "none" ] && [ "$owner" != "$me" ]; then
+    echo "susfs_samsung_lkm was loaded by $owner, not $me - leaving it loaded"
+    return 0
+  fi
   rmmod susfs_samsung_lkm 2>/dev/null ||
     { [ -x /data/adb/ksu/bin/busybox ] && /data/adb/ksu/bin/busybox rmmod susfs_samsung_lkm 2>/dev/null; }
 }
