@@ -259,12 +259,22 @@ static int fp_install_one(struct susfs_fp_hook *h)
 			h->name, h->wrapper ? READ_ONCE(*(const u32 *)h->wrapper) : 0);
 		return -EINVAL;
 	}
+	if (h->wrapper_compat && !susfs_arm64_fn_has_landing_pad((const void *)h->wrapper_compat)) {
+		pr_warn("susfs_fp: %s compat wrapper has no valid call landing pad (0x%08x) - not installed\n",
+			h->name, READ_ONCE(*(const u32 *)h->wrapper_compat));
+		return -EINVAL;
+	}
 
 	if (h->nr >= 0) {
 		old = READ_ONCE(sys_call_table_ptr[h->nr]);
 		if (!old) {
 			pr_warn("susfs_fp: %s: table entry is NULL\n", h->name);
 			return -ENOENT;
+		}
+		if (old == h->wrapper) {
+			pr_warn("susfs_fp: %s: native entry already points at our wrapper - stale from a previous load, refusing to recurse\n",
+				h->name);
+			return -EINVAL;
 		}
 
 		/* Publish the original BEFORE the table points at us: the wrapper reads this
@@ -291,17 +301,25 @@ static int fp_install_one(struct susfs_fp_hook *h)
 				h->name);
 		} else {
 			susfs_syscall_fn_t cold = READ_ONCE(compat_sys_call_table_ptr[cnr]);
+			susfs_syscall_fn_t compat_wrapper = h->wrapper_compat ? h->wrapper_compat : h->wrapper;
 
 			if (!cold) {
 				pr_warn("susfs_fp: %s: compat entry %d is NULL\n",
 					h->name, cnr);
+			} else if (cold == compat_wrapper) {
+				pr_warn("susfs_fp: %s: compat entry %d already points at our wrapper - stale from a previous load, refusing to recurse\n",
+					h->name, cnr);
+				if (native_done)
+					ksu_patch_text(&sys_call_table_ptr[h->nr], &h->orig,
+						       sizeof(h->orig), KSU_PATCH_TEXT_FLUSH_DCACHE);
+				return -EINVAL;
 			} else {
 				h->orig_compat = cold;
 				if (h->orig_slot_compat)
 					WRITE_ONCE(*h->orig_slot_compat, cold);
 				smp_wmb();
 				err = fp_patch_entry(compat_sys_call_table_ptr, cnr, h->name,
-						     h->wrapper, cold, h->orig_slot_compat);
+						     compat_wrapper, cold, h->orig_slot_compat);
 				if (err) {
 					/* Keep the two tables consistent rather than half-armed. */
 					if (native_done)
@@ -344,23 +362,26 @@ int susfs_fp_install(struct susfs_fp_hook *h)
 
 void susfs_fp_remove(struct susfs_fp_hook *h)
 {
+	susfs_syscall_fn_t compat_wrapper;
+	bool native_ours = true;
 	int cnr, err;
 
 	if (!h->installed || !sys_call_table_ptr)
 		return;
 
 	cnr = fp_compat_nr(h);
+	compat_wrapper = h->wrapper_compat ? h->wrapper_compat : h->wrapper;
 
 	if (h->nr >= 0 && READ_ONCE(sys_call_table_ptr[h->nr]) != h->wrapper &&
 	    !fp_ours_on_branch_route(READ_ONCE(sys_call_table_ptr[h->nr]), h->wrapper, h->orig)) {
-		pr_warn("susfs_fp: nr %d is not ours any more, leaving it alone\n", h->nr);
-		h->installed = false;
-		return;
+		pr_warn("susfs_fp: nr %d is not ours any more, leaving the native entry alone\n",
+			h->nr);
+		native_ours = false;
 	}
 
 	if (cnr >= 0 && compat_sys_call_table_ptr && h->orig_compat &&
-	    (READ_ONCE(compat_sys_call_table_ptr[cnr]) == h->wrapper ||
-	     fp_ours_on_branch_route(READ_ONCE(compat_sys_call_table_ptr[cnr]), h->wrapper,
+	    (READ_ONCE(compat_sys_call_table_ptr[cnr]) == compat_wrapper ||
+	     fp_ours_on_branch_route(READ_ONCE(compat_sys_call_table_ptr[cnr]), compat_wrapper,
 				     h->orig_compat))) {
 		err = fp_restore_entry(compat_sys_call_table_ptr, cnr, h->name, h->orig_compat);
 		if (err)
@@ -371,7 +392,7 @@ void susfs_fp_remove(struct susfs_fp_hook *h)
 	}
 
 	/* nr < 0 means there is no native entry: only the compat one above was ours. */
-	if (h->nr >= 0) {
+	if (h->nr >= 0 && native_ours) {
 		err = fp_restore_entry(sys_call_table_ptr, h->nr, h->name, h->orig);
 		if (err)
 			pr_warn("susfs_fp: nr %d restore failed %d\n", h->nr, err);

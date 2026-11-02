@@ -335,7 +335,7 @@ int susfs_rkp_branch_patch_callthru(void *dst, void *src, void **callthru)
      * clobber the landing pad: an indirect call arrives with BLR, and a function whose
      * fn+0 no longer takes that call raises a BTI violation instead of running. */
 	preamble_skip = 0;
-	while (preamble_skip < 2 && susfs_arm64_insn_is_landing_pad(displaced)) {
+	while (preamble_skip < 2 && susfs_arm64_insn_is_pad(displaced)) {
 		/* Only fn+0 may be stepped over.  A PAC instruction beyond it - "bti c" immediately
          * followed by "paciasp", which is what -mbranch-protection=standard emits - has to
          * take the branch itself: it signs LR in place, so a branch placed after it reaches
@@ -346,6 +346,16 @@ int susfs_rkp_branch_patch_callthru(void *dst, void *src, void **callthru)
 			break;
 		preamble_skip++;
 		displaced = *(u32 *)((u8 *)fn + preamble_skip * 4);
+	}
+
+	/* Nothing to step over: fn+0 is the word an indirect call lands on, and replacing it
+	 * with a branch is the one thing this walk exists to prevent.  A BLR onto a branch
+	 * instruction raises a BTI violation, so an entry without a landing pad cannot host a
+	 * site at all - report it and leave the function alone. */
+	if (preamble_skip == 0) {
+		mutex_unlock(&rkp_site_lock);
+		pr_err("rkp: %pS: no landing pad at the entry, not installing\n", fn);
+		return -EINVAL;
 	}
 
 	patch_addr = (u8 *)fn + preamble_skip * 4;
