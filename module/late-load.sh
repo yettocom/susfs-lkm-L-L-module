@@ -33,39 +33,10 @@ LKM="$MODDIR/lib/susfs_samsung_lkm-$KMI.ko"
 [ -s "$LKM" ] || { echo "Missing packaged LKM for $KMI."; exit 1; }
 echo "Selected kernel KMI: $KMI"
 
-# lib/releases records the release each .ko was built against.  A different release of the same KMI
-# means the image's vermagic does not match this kernel: `ksud insmod` refuses it, and the standalone
-# loader would rewrite the vermagic to force it in - ABI-lying, not proof of compatibility.  Fail
-# closed, with an override for an operator who knows the two firmwares share the ABI.
-if [ -r "$MODDIR/lib/releases" ]; then
-  # `while read` from a redirection, not a pipe: a pipe would run the loop in a subshell and EXPECTED
-  # would be lost.  Plain shell, not awk: a missing applet must not make this gate disappear.
-  EXPECTED=""
-  while read -r rel_kmi rel_release _rest; do
-    [ "$rel_kmi" = "$KMI" ] || continue
-    EXPECTED="$rel_release"
-    break
-  done < "$MODDIR/lib/releases"
-  # The packager writes one entry per packaged .ko, so a KMI we ship without one means the two halves
-  # of the package disagree - worth stopping on, not guessing about.
-  if [ -z "$EXPECTED" ]; then
-    echo "Refusing to load: $KMI has no usable entry in lib/releases (the package is inconsistent)."
-    exit 1
-  fi
-  if [ "$EXPECTED" != "$REAL_KERNEL" ]; then
-    if [ "$ALLOW_RELEASE_MISMATCH" = "1" ]; then
-      echo "WARNING: running release $REAL_KERNEL != $EXPECTED for $KMI; continuing (ALLOW_RELEASE_MISMATCH=1)"
-    else
-      echo "Running release: $REAL_KERNEL"
-      echo "Built for:       $EXPECTED ($KMI)"
-      echo "Refusing to load: the packaged LKM is built for another release of this KMI."
-      echo "If the two firmwares really share the kernel ABI, set ALLOW_RELEASE_MISMATCH=1 and re-run."
-      exit 1
-    fi
-  fi
-else
-  echo "WARNING: lib/releases is missing - the built-for-release check is skipped"
-fi
+# The .ko carries the DDK image's own release string (one per KMI, not per firmware), which will
+# not match this device's.  bin/susfs_insmod reads the release the kernel asks for out of kmsg and
+# rewrites the module's vermagic before retrying - that is upstream's mechanism, not an override,
+# so nothing here compares releases.
 
 # 0 = SUSFS already there, 10 = provably absent, anything else = we cannot tell, so refuse.
 "$MODDIR/bin/susfs_probe"
@@ -80,8 +51,8 @@ esac
 # not used: /data/adb/ksud is a shared, mutable file - late-load renames its own staged daemon over it
 # (late_load.rs:44, before this stage runs), so it is usually the matching one, but nothing here can
 # prove it, and a foreign or stale ksud would load the module with a loader we did not build.  This
-# binary comes from the package and can also rewrite a vermagic the kernel refused (the
-# ALLOW_RELEASE_MISMATCH case above), which ksud's insmod cannot.
+# binary comes from the package and is the only loader here that can rewrite a vermagic the kernel
+# refused, which ksud's insmod cannot.
 # owner_nonce= names the instance that owns this ko, by module id (`${MODDIR##*/}`), and
 # /proc/susfs_status echoes it back.  The id and not the path: `$0`-derived paths differ between
 # a direct call, a sourced file and the post-fs-data.d trampoline, and lib.sh's unload compares
