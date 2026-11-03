@@ -47,12 +47,12 @@
 #define susfs_rkp_free(p) vfree(p)
 #endif
 
-/* Every syscall hook and every seq_operations slot takes one site: kstat 14, create_gate 4,
- * opath 5, sus_map 2 and supercall 1 are 26 today, and r18.8 brought the create family back.
- * A request past this table returns -ENOMEM, which the callers only warn about, so the layers
- * that came last lose their hooks without a single line saying so.  The stub page holds
- * PAGE_SIZE/16 slots and is the other limit; the site table is the one that ran out at 16. */
-#define SUSFS_RKP_MAX_SITES 32
+/* One entry per branch site, not per hook: a hook that carries both a native and a 32-bit
+ * entry installs two branches (kstat 14, create_gate 8, opath 5, sus_map 2, supercall 1 = 30).
+ * A request past this table returns -ENOMEM and the callers only warn, so a hook added
+ * upstream without widening the table stops working with nothing in dmesg that names it.
+ * The stub page is the second ceiling (SUSFS_RKP_STUBS_PER_PAGE). */
+#define SUSFS_RKP_MAX_SITES 40	/* 30 today; the rest keeps the next few hooks from dropping silently */
 
 /*
  * One stub is 16 bytes, entry at +4:
