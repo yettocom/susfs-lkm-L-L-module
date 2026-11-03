@@ -47,11 +47,12 @@
 #define susfs_rkp_free(p) vfree(p)
 #endif
 
-/* 14 kstat entries and 5 opath entries resolve to 18 distinct targets, and the direct-route
- * fallback adds a few more: 16 left the last installs with -ENOMEM, i.e. those hooks stayed
- * on the direct route without a word.  The stub page holds PAGE_SIZE/16 slots, so the site
- * table is the only limit. */
-#define SUSFS_RKP_MAX_SITES 24
+/* Every syscall hook and every seq_operations slot takes one site: kstat 14, create_gate 4,
+ * opath 5, sus_map 2 and supercall 1 are 26 today, and r18.8 brought the create family back.
+ * A request past this table returns -ENOMEM, which the callers only warn about, so the layers
+ * that came last lose their hooks without a single line saying so.  The stub page holds
+ * PAGE_SIZE/16 slots and is the other limit; the site table is the one that ran out at 16. */
+#define SUSFS_RKP_MAX_SITES 32
 
 /*
  * One stub is 16 bytes, entry at +4:
@@ -264,6 +265,14 @@ int susfs_rkp_branch_patch_callthru(void *dst, void *src, void **callthru)
 	 * predicate for this and is resolved optionally (see susfs_rkp_init()). */
 	if (rkp_kernel_text && !rkp_kernel_text((unsigned long)fn)) {
 		pr_err("rkp: %pS is not kernel text, not installing\n", fn);
+		return -EINVAL;
+	}
+
+	/* The branch lands on new_fn.  Every caller passes a wrapper of ours or the original it
+	 * saved, so this cannot fire today; it is the one place where a data pointer handed in as
+	 * a replacement would become an instruction in a page that is not code. */
+	if (rkp_kernel_text && !rkp_kernel_text((unsigned long)new_fn)) {
+		pr_err("rkp: %pS is not kernel text, refusing to branch to it\n", new_fn);
 		return -EINVAL;
 	}
 

@@ -310,8 +310,8 @@ static int fp_install_one(struct susfs_fp_hook *h)
 				pr_warn("susfs_fp: %s: compat entry %d already points at our wrapper - stale from a previous load, refusing to recurse\n",
 					h->name, cnr);
 				if (native_done)
-					ksu_patch_text(&sys_call_table_ptr[h->nr], &h->orig,
-						       sizeof(h->orig), KSU_PATCH_TEXT_FLUSH_DCACHE);
+					fp_restore_entry(sys_call_table_ptr, h->nr, h->name,
+							 h->orig);
 				return -EINVAL;
 			} else {
 				h->orig_compat = cold;
