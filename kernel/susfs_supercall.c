@@ -430,13 +430,15 @@ static struct kprobe reboot_kp = {
  *
  * So step over the landing pad and probe the word behind it.  Which word that is gets decided at
  * run time, from the instruction, never from a CONFIG: the module is built against a DDK image
- * whose config is not the device's, and the loader checks vermagic only.  A word that is not a pad
- * means the entry is not behind a BTI check at all (the compiler pads every indirect-call target),
- * and offset 0 is then where the probe belongs.
+ * whose config is not the device's, and the loader checks vermagic only.  A word outside that set is
+ * NOT read as "no pad here": a Samsung 5.15 device opened __arm64_sys_reboot with an unrecognised
+ * word while every other syscall in the same table carried a pad, and probing offset 0 there put the
+ * breakpoint on the landing pad itself, so the next reboot(2) raised BTYPE=-c and the device
+ * panicked.  A recognised pad earns a step-over; anything else refuses.
  *
- * Returns 0 and writes *target, or -ENOENT/-EFAULT.  The caller must NOT arm a probe on failure:
- * a breakpoint on the wrong word is a device that panics on its next reboot(2), which is exactly
- * the outcome this function exists to prevent. */
+ * Returns 0 and writes *target, or -ENOENT/-EFAULT/-EINVAL.  The caller must NOT arm a probe on any
+ * failure: a breakpoint on the wrong word is a device that panics on its next reboot(2), which is
+ * exactly the outcome this function exists to prevent. */
 static int reboot_kprobe_target(unsigned long *target)
 {
 	static const char *const name = "__arm64_sys_reboot";
@@ -453,13 +455,25 @@ static int reboot_kprobe_target(unsigned long *target)
 		pr_err("susfs supercall: cannot read the %s entry, refusing to arm a probe there\n", name);
 		return -EFAULT;
 	}
-	if (susfs_arm64_insn_is_pad(insn)) {
-		fn += sizeof(insn);
-		if (copy_from_kernel_nofault(&insn, (void *)fn, sizeof(insn))) {
-			pr_err("susfs supercall: cannot read the word behind the %s landing pad, refusing to arm a probe there\n",
-			       name);
-			return -EFAULT;
-		}
+	/* Only a pad this build recognises earns a step-over - see the note above the function. */
+	if (!susfs_arm64_insn_is_pad(insn)) {
+		pr_err("susfs supercall: the %s entry opens with 0x%08x, not a landing pad this build knows;\n"
+		       " refusing to arm a probe there\n", name, insn);
+		return -EINVAL;
+	}
+	fn += sizeof(insn);
+	if (copy_from_kernel_nofault(&insn, (void *)fn, sizeof(insn))) {
+		pr_err("susfs supercall: cannot read the word behind the %s landing pad, refusing to arm a probe there\n",
+		       name);
+		return -EFAULT;
+	}
+	/* reboot_pre() answers a handled supercall with regs->pc = regs->regs[30].  Behind a
+	 * paciasp/pacibsp that register already holds a signed pointer and jumping to it faults, so
+	 * a probe there would trade a BTI panic for a PAC one. */
+	if (susfs_arm64_is_pac(insn)) {
+		pr_err("susfs supercall: %s signs its link register at +4, so a probe there cannot skip\n"
+		       " the call; refusing to arm one\n", name);
+		return -EINVAL;
 	}
 
 	*target = fn;

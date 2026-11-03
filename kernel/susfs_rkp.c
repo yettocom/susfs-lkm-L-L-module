@@ -363,7 +363,11 @@ int susfs_rkp_branch_patch_callthru(void *dst, void *src, void **callthru)
 	 * site at all - report it and leave the function alone. */
 	if (preamble_skip == 0) {
 		mutex_unlock(&rkp_site_lock);
-		pr_err("rkp: %pS: no landing pad at the entry, not installing\n", fn);
+		/* Print the words themselves: a device showed this on __arm64_sys_reboot while every
+		 * other syscall in the same table carried a landing pad, and the next report has to
+		 * name that word before the pad set here can be widened. */
+		pr_err("rkp: %pS: no landing pad at the entry (0x%08x 0x%08x), not installing\n",
+		       fn, fn0_insn, *(u32 *)((u8 *)fn + 4));
 		return -EINVAL;
 	}
 
