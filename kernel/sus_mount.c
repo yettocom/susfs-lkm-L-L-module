@@ -850,6 +850,13 @@ static void sus_mount_learn_ns(struct mnt_namespace *ns)
         int shown;
 
         r = SUS_MOUNT_ITER_MOUNT(pos);
+        /* A namespace list also carries entries that are no mount with a root: the
+         * proc_mounts cursor is linked in while the per-pid mounts file is being read, and
+         * vfsmount stays zeroed.  Only mnt_root and mnt_sb are dereferenced below, and a
+         * mounted vfsmount always has both, so an entry missing either is one the kernel's
+         * own iterator skips as well (fs/namespace.c mnt_is_cursor()). */
+        if (!r->mnt.mnt_root || !r->mnt.mnt_sb)
+            continue;
         if (SUS_MOUNT_MNT_NOT_IN_NS(r, ns))
             continue;
         if (!sus_mount_is_ours(r))
@@ -916,6 +923,13 @@ static int sus_mount_learn_ns_walk(struct mnt_namespace *ns)
         if (seen++ >= SUS_MOUNT_MAX_SCAN)
             break;
         r = SUS_MOUNT_ITER_MOUNT(pos);
+        /* A namespace list also carries entries that are no mount with a root: the
+         * proc_mounts cursor is linked in while the per-pid mounts file is being read, and
+         * vfsmount stays zeroed.  Only mnt_root and mnt_sb are dereferenced below, and a
+         * mounted vfsmount always has both, so an entry missing either is one the kernel's
+         * own iterator skips as well (fs/namespace.c mnt_is_cursor()). */
+        if (!r->mnt.mnt_root || !r->mnt.mnt_sb)
+            continue;
         if (SUS_MOUNT_MNT_NOT_IN_NS(r, ns))
             continue;
         if (!sus_mount_is_ours(r))
@@ -2205,6 +2219,13 @@ static int sus_mount_scan_ns(struct mnt_namespace *ns, char *buf, unsigned long 
          * (fs/namespace.c:678-681 mnt_is_cursor(), include/linux/mount.h:70): below
          * 6.12 MNT_CURSOR is what keeps them out of the walk, from 6.12 on they are
          * simply not in ns->mounts - both are what SUS_MOUNT_MNT_NOT_IN_NS() tests. */
+        /* A namespace list also carries entries that are no mount with a root: the
+         * proc_mounts cursor is linked in while the per-pid mounts file is being read, and
+         * vfsmount stays zeroed.  Only mnt_root and mnt_sb are dereferenced below, and a
+         * mounted vfsmount always has both, so an entry missing either is one the kernel's
+         * own iterator skips as well (fs/namespace.c mnt_is_cursor()). */
+        if (!r->mnt.mnt_root || !r->mnt.mnt_sb)
+            continue;
         if (SUS_MOUNT_MNT_NOT_IN_NS(r, ns)) {
             n_skipped_ns++;
             continue;
