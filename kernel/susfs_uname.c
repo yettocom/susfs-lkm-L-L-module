@@ -70,8 +70,8 @@ static int kr_newuname_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 }
 
 /* No .kp.symbol_name: __arm64_sys_newuname is what sys_call_table[] holds, so invoke_syscall()
- * reaches it through a pointer and the probe belongs behind its landing pad - see
- * susfs_kp_set_indirect_addr() in susfs_kprobe.h. */
+ * reaches it through a pointer.  A kretprobe cannot be armed there at either offset - see
+ * susfs_kr_refuse_indirect() in susfs_kprobe.h - so the uname spoof reports itself off. */
 static struct kretprobe krp = {
     .entry_handler = kr_newuname_entry,
     .handler = kr_newuname_ret,
@@ -97,7 +97,7 @@ static int uname_register(void)
         mutex_unlock(&uname_ctl_lock);
         return 0;
     }
-    rc = susfs_kp_set_indirect_addr(&krp.kp, "__arm64_sys_newuname");
+    rc = susfs_kr_refuse_indirect("__arm64_sys_newuname");
     if (!rc)
         rc = register_kretprobe(&krp);
     if (rc) {

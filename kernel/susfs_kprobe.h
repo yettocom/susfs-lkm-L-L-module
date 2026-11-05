@@ -187,4 +187,47 @@ static inline void susfs_kp_skip_syscall(struct pt_regs *regs)
 		susfs_kp_skip_call(regs);
 }
 
+/*
+ * A kretprobe cannot be armed on an indirect-call target, and that is why the two families have
+ * separate helpers.
+ *
+ * A kretprobe replaces the return address it finds, which on an arm64 kernel built with pac-ret
+ * is not a plain value:
+ *  - at +0 the breakpoint takes the landing pad away and the next indirect call raises the
+ *    branch-type exception described above - the caller IS indirect here, that is the premise;
+ *  - at +4 x30 already holds a signed caller address.  The kretprobe stores that in
+ *    ri->ret_addr and the trampoline returns through it, and a signed pointer is not a target;
+ *  - and a probe that replaced the signing instruction instead does not help either: the
+ *    callee's epilogue authenticates whatever x30 holds by then, which is the trampoline this
+ *    module does not own.
+ *
+ * None of the offsets is safe, so the caller is told instead of being handed one.  The feature
+ * stays off with a log that names it, rather than taking panic_on_oops down with it.  The
+ * targets this affects: the sys_call_table wrappers reached through invoke_syscall(),
+ * map_files_get_link through i_op->get_link, and single_open()'s seq_show through seq_ops->show.
+ */
+static inline int susfs_kr_refuse_indirect_at(unsigned long fn, const char *name)
+{
+	u32 insn = 0;
+	bool signed_entry;
+
+	if (!fn) {
+		pr_warn("susfs_krp: %s was not found - not arming a kretprobe on it\n", name);
+		return -ENOENT;
+	}
+	signed_entry = !copy_from_kernel_nofault(&insn, (void *)fn, sizeof(insn)) &&
+		       susfs_arm64_is_pac(insn);
+	pr_warn("susfs_krp: %s is reached through a pointer: at +0 the breakpoint would take the "
+		"landing pad away, at +4 x30 is %s, and a kretprobe returns through the address it "
+		"finds there - not arming one\n", name,
+		signed_entry ? "already signed by the entry" :
+		"replaced by the trampoline the callee then authenticates");
+	return -EOPNOTSUPP;
+}
+
+static inline int susfs_kr_refuse_indirect(const char *name)
+{
+	return susfs_kr_refuse_indirect_at(find_kernel_symbol_exact(name), name);
+}
+
 #endif /* _SUSFS_KPROBE_H */
