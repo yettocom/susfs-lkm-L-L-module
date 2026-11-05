@@ -783,7 +783,7 @@ static int sus_map_maplink_ret(struct kretprobe_instance *ri, struct pt_regs *re
 
 /* No .kp.symbol_name: map_files_get_link is reached through inode->i_op->get_link, an indirect
  * call that checks the target's landing pad, and a kretprobe cannot sit on such a target at
- * either offset - see susfs_kr_refuse_indirect() in susfs_kprobe.h. */
+ * either offset - see susfs_kr_set_indirect_addr() in susfs_kprobe.h. */
 static struct kretprobe kr_map_files = {
     .entry_handler = sus_map_maplink_entry,
     .handler = sus_map_maplink_ret,
@@ -964,7 +964,7 @@ static int sus_map_register_probes(void)
     /* The map_files hook is a kretprobe, so it lives outside map_probes[] (which
      * holds struct kprobe *) and is tracked on its own; optional like the rest. */
     if (!kr_map_files_ok) {
-        int rc = susfs_kr_refuse_indirect("map_files_get_link");
+        int rc = susfs_kr_set_indirect_addr(&kr_map_files, "map_files_get_link");
 
         if (!rc)
             rc = register_kretprobe(&kr_map_files);

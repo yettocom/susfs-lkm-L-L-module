@@ -10,6 +10,10 @@
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
 #include <linux/cred.h>	/* current_uid(), control-node gate */
+#include <linux/spinlock.h>
+#include <linux/string.h>	/* memset(), clearing the ring */
+#include <linux/stdarg.h>	/* va_list for susfs_log_store() */
+#include <linux/timekeeping.h>	/* ktime_get_ns(), the stamp readers match against dmesg */
 #include "susfs_abi.h"
 #include "susfs_log.h"
 #include "susfs.h"	/* susfs_expose_proc */
@@ -26,6 +30,113 @@ bool susfs_log_enabled(void)
 {
 	return READ_ONCE(log_enabled);
 }
+
+/*
+ * The ring behind /proc/susfs_log.
+ *
+ * 256 lines is sized for the load-time burst (site table, LSM hooks, the refusals) several times
+ * over; 256 bytes per line holds the longest message this module writes, and a longer one is
+ * truncated by vsnprintf rather than lost.  Only this module's own lines are here - filtering
+ * dmesg by prefix shows the same strings, but only until the kernel ring wraps, and a panic takes
+ * that buffer with it while this one is gone too, which is why the node is read on a live device.
+ */
+#define SUSFS_LOG_RING_SLOTS	256
+#define SUSFS_LOG_RING_LINE	256
+
+struct susfs_log_line {
+	u64 ns;
+	char text[SUSFS_LOG_RING_LINE];
+};
+
+static struct susfs_log_line susfs_log_ring[SUSFS_LOG_RING_SLOTS];
+static unsigned int susfs_log_head;
+static unsigned int susfs_log_count;
+static DEFINE_SPINLOCK(susfs_log_lock);
+
+void susfs_log_store(const char *fmt, ...)
+{
+	struct susfs_log_line *line;
+	unsigned long flags;
+	va_list args;
+
+	if (!fmt)
+		return;
+
+	/* Formatting happens under the lock: a slot that wrapped must not be half written while the
+	 * reader copies it, and 256 bytes into a static buffer is not worth a second lock. */
+	spin_lock_irqsave(&susfs_log_lock, flags);
+	line = &susfs_log_ring[susfs_log_head];
+	susfs_log_head = (susfs_log_head + 1) % SUSFS_LOG_RING_SLOTS;
+	if (susfs_log_count < SUSFS_LOG_RING_SLOTS)
+		susfs_log_count++;
+	line->ns = ktime_get_ns();
+	va_start(args, fmt);
+	vsnprintf(line->text, sizeof(line->text), fmt, args);
+	va_end(args);
+	spin_unlock_irqrestore(&susfs_log_lock, flags);
+}
+
+static int susfs_log_proc_show(struct seq_file *m, void *v)
+{
+	unsigned long flags;
+	unsigned int count, i, first;
+	struct susfs_log_line one;
+
+	spin_lock_irqsave(&susfs_log_lock, flags);
+	count = susfs_log_count;
+	first = (susfs_log_head + SUSFS_LOG_RING_SLOTS - count) % SUSFS_LOG_RING_SLOTS;
+	spin_unlock_irqrestore(&susfs_log_lock, flags);
+
+	seq_printf(m, "susfs ring: %u of %u lines held for this boot\n", count,
+		   (unsigned int)SUSFS_LOG_RING_SLOTS);
+	seq_printf(m, "timestamps read like dmesg; write anything here to clear the ring\n\n");
+	for (i = 0; i < count; i++) {
+		spin_lock_irqsave(&susfs_log_lock, flags);
+		one = susfs_log_ring[(first + i) % SUSFS_LOG_RING_SLOTS];
+		spin_unlock_irqrestore(&susfs_log_lock, flags);
+		seq_printf(m, "[%5u.%06u] %s", (unsigned int)(one.ns / NSEC_PER_SEC),
+			   (unsigned int)((one.ns % NSEC_PER_SEC) / 1000), one.text);
+	}
+	return 0;
+}
+
+static int susfs_log_proc_open(struct inode *inode, struct file *file)
+{
+	/* Same contract as the enable node above: 0777 so DAC passes and sus_path's hidden set
+	 * answers ENOENT for non-root callers, plus this check for when that hook is not the one
+	 * answering. */
+	if (!susfs_control_visible())
+		return -ENOENT;
+	return single_open(file, susfs_log_proc_show, NULL);
+}
+
+static ssize_t susfs_log_proc_write(struct file *file, const char __user *buf,
+				    size_t len, loff_t *off)
+{
+	unsigned long flags;
+
+	if (!susfs_control_visible())
+		return -ENOENT;
+	if (!len)
+		return 0;
+
+	spin_lock_irqsave(&susfs_log_lock, flags);
+	susfs_log_head = 0;
+	susfs_log_count = 0;
+	memset(susfs_log_ring, 0, sizeof(susfs_log_ring));
+	spin_unlock_irqrestore(&susfs_log_lock, flags);
+	return len;
+}
+
+static const struct proc_ops susfs_log_proc_ops = {
+	.proc_open = susfs_log_proc_open,
+	.proc_read = seq_read,
+	.proc_write = susfs_log_proc_write,
+	.proc_lseek = seq_lseek,
+	.proc_release = single_release,
+};
+
+static struct proc_dir_entry *susfs_log_entry;
 /* Deliberately NOT EXPORT_SYMBOL'd: the only user is this module (susfs_log.h wraps it), and an exported name
  * shows up as a [susfs_samsung_lkm]-owned symbol in /proc/kallsyms - outward surface upstream SUSFS lacks. */
 
@@ -96,6 +207,12 @@ int susfs_enable_log_init(void)
 			pr_warn("proc_create(susfs_enable_log) failed\n");
 		else
 			SUSFS_LOGI("susfs_enable_log: armed (proc: /proc/susfs_enable_log)\n");
+		susfs_log_entry = proc_create("susfs_log", 0777, NULL, &susfs_log_proc_ops);
+		if (!susfs_log_entry)
+			pr_warn("proc_create(susfs_log) failed - the ring is kept but cannot be read\n");
+		else
+			SUSFS_LOGI("susfs_log: armed (proc: /proc/susfs_log, %u lines)\n",
+				   (unsigned int)SUSFS_LOG_RING_SLOTS);
 	} else {
 		SUSFS_LOGI("susfs_enable_log: /proc node not created (expose_proc=%d lsm=%d)\n",
 			(int)susfs_expose_proc, (int)sus_path_lsm_active());
@@ -105,6 +222,10 @@ int susfs_enable_log_init(void)
 
 void susfs_enable_log_exit(void)
 {
+	if (susfs_log_entry) {
+		proc_remove(susfs_log_entry);
+		susfs_log_entry = NULL;
+	}
 	if (log_proc_entry) {
 		proc_remove(log_proc_entry);
 		log_proc_entry = NULL;

@@ -1,0 +1,69 @@
+#!/system/bin/sh
+# susfs-log - collect everything a report needs into one file.
+#
+#   susfs-log [output-file]
+#
+# The kernel ring buffer has wrapped by the time a phone reaches a desk, and a panic takes it
+# away entirely.  So this reads, in one pass:
+#   /proc/susfs_log   this module's own ring (SUSFS_LOGI/LOGW/LOGE), kept since this boot
+#   dmesg             whatever is still in the kernel ring, filtered to this feature
+#   pstore            the PREVIOUS boot's console log, where an Oops survives the panic
+#   /proc/susfs_status  which layer is up, and what was denied
+#
+# Run it as root.  Default output is /sdcard/susfs-log-<date>.txt.
+set -u
+
+if [ -n "${1:-}" ]; then
+	out=$1
+else
+	ts=$(date +%Y%m%d-%H%M%S 2>/dev/null) || ts=now
+	out=/sdcard/susfs-log-$ts.txt
+	if [ ! -d /sdcard ]; then
+		out=/data/local/tmp/susfs-log-$ts.txt
+	fi
+fi
+
+collect=$out.part
+if ! : > "$collect" 2>/dev/null; then
+	collect=/data/local/tmp/susfs-log.txt
+	: > "$collect" 2>/dev/null || { echo "susfs-log: cannot write output" >&2; exit 1; }
+fi
+
+{
+	echo "== susfs-log $(date 2>/dev/null)"
+	echo
+	echo "== uname"
+	uname -a
+	echo
+	echo "== modules (susfs / kernelsu / dfroot)"
+	grep -E 'susfs|kernelsu|dfroot' /proc/modules 2>/dev/null || echo "(none listed - not loaded, or /proc/modules is restricted)"
+	echo
+	echo "== /proc/susfs_status"
+	cat /proc/susfs_status 2>/dev/null || echo "(missing - the module is not loaded, or the node is hidden)"
+	echo
+	echo "== /proc/susfs_log (this module's ring, this boot)"
+	cat /proc/susfs_log 2>/dev/null || echo "(missing - needs a build with the ring, or the module is not loaded)"
+	echo
+	echo "== dmesg, filtered (this boot; may already be wrapped)"
+	if dmesg >/dev/null 2>&1; then
+		dmesg | grep -aE 'susfs|rkp:|susfs_kp|susfs_krp|Oops|Internal error|Kernel panic' | tail -n 400
+	else
+		echo "(dmesg is not readable - run this as root)"
+	fi
+	echo
+	echo "== pstore (previous boot; where an Oops survives)"
+	found=0
+	for f in /sys/fs/pstore/console-ramoops* /sys/fs/pstore/dmesg-ramoops*; do
+		[ -f "$f" ] || continue
+		found=1
+		echo "-- $f"
+		grep -aE 'susfs|rkp:|susfs_kp|susfs_krp|Oops|Internal error|Kernel panic|pc :|BTI' "$f" | tail -n 400
+	done
+	[ "$found" -eq 1 ] || echo "(no pstore console log - not enabled here, or wiped by a clean boot)"
+} > "$collect" 2>&1
+
+if mv -f "$collect" "$out" 2>/dev/null; then
+	echo "susfs-log: $out"
+else
+	echo "susfs-log: $collect"
+fi

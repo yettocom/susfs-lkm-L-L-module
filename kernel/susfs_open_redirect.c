@@ -883,7 +883,7 @@ static void or_register_reverse(void)
 		for (i = 0; i < n; i++) {
 			struct kretprobe *kr = &kr_or_fdinfo[i];
 
-			rc = susfs_kr_refuse_indirect_at(addrs[i], "seq_show");
+			rc = susfs_kr_set_indirect_addr_at(kr, addrs[i], "seq_show");
 			if (rc) {
 				pr_warn("open_redirect: seq_show @%px is not probeable %d - "
 					"fdinfo names the redirected inode\n",

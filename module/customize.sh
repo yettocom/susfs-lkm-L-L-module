@@ -12,6 +12,7 @@ set_perm "$MODPATH/late-load.sh" 0 0 0755
 set_perm "$MODPATH/emulated-soft-reboot.sh" 0 0 0755
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
 set_perm "$MODPATH/bin/susfs_probe" 0 0 0755
+set_perm "$MODPATH/bin/susfs-log" 0 0 0755
 set_perm "$MODPATH/bin/susfs_insmod" 0 0 0755
 set_perm "$MODPATH/lib.sh" 0 0 0755
 set_perm "$MODPATH/post-mount.sh" 0 0 0755

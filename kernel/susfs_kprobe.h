@@ -54,6 +54,7 @@
 
 #include "symbol_resolver.h"
 #include "susfs_arm64.h"
+#include "susfs_log.h"	/* the ring: SUSFS_LOGI/LOGW/LOGE store */
 
 /* Call AFTER unregister_kprobe()/unregister_kretprobe() returns, never before: unregister_kprobes()
  * runs each probe's bottom half only `if (kps[i]->addr)`, so clearing the field first would skip
@@ -117,24 +118,25 @@ static inline int susfs_kp_set_indirect_addr_at(struct kprobe *kp, unsigned long
 	if (!fn)
 		return -ENOENT;
 	if (copy_from_kernel_nofault(&insn, (void *)fn, sizeof(insn))) {
-		pr_err("susfs_kp: %s: the entry is not readable, not arming a probe there\n",
-		       name);
+		SUSFS_LOGE("susfs_kp: %s: the entry is not readable, not arming a probe there\n",
+			   name);
 		return -EFAULT;
 	}
 	if (!susfs_arm64_insn_is_pad(insn))
-		pr_info("susfs_kp: %s opens with 0x%08x, taking it as a landing pad\n",
-			name, insn);
+		SUSFS_LOGI("susfs_kp: %s opens with 0x%08x, taking it as a landing pad\n",
+			   name, insn);
 	fn += sizeof(insn);
 	if (copy_from_kernel_nofault(&insn, (void *)fn, sizeof(insn))) {
-		pr_err("susfs_kp: %s: the word behind the entry is not readable, "
-		       "not arming a probe there\n", name);
+		SUSFS_LOGE("susfs_kp: %s: the word behind the entry is not readable, "
+			   "not arming a probe there\n", name);
 		return -EFAULT;
 	}
 	if (susfs_arm64_is_pac(insn))
-		pr_info("susfs_kp: %s signs its link register at +4; the probe replaces that "
-			"instruction, so the signature never runs\n", name);
+		SUSFS_LOGI("susfs_kp: %s signs its link register at +4; the breakpoint takes that "
+			   "instruction's place, so a handler that leaves the call never runs it and one "
+			   "that lets the call run has it single-stepped\n", name);
 	kp->addr = (kprobe_opcode_t *)fn;
-	pr_info("susfs_kp: %s+0x%lx\n", name, fn - base);
+	SUSFS_LOGI("susfs_kp: %s+0x%lx\n", name, fn - base);
 	return 0;
 }
 
@@ -188,46 +190,64 @@ static inline void susfs_kp_skip_syscall(struct pt_regs *regs)
 }
 
 /*
- * A kretprobe cannot be armed on an indirect-call target, and that is why the two families have
- * separate helpers.
+ * A kretprobe behind a pointer, and when it is safe to arm one.
  *
- * A kretprobe replaces the return address it finds, which on an arm64 kernel built with pac-ret
- * is not a plain value:
+ * A kretprobe replaces the return address it finds with its trampoline and puts that address back
+ * on return, so x30 at the probe has to be a plain caller address:
  *  - at +0 the breakpoint takes the landing pad away and the next indirect call raises the
  *    branch-type exception described above - the caller IS indirect here, that is the premise;
- *  - at +4 x30 already holds a signed caller address.  The kretprobe stores that in
- *    ri->ret_addr and the trampoline returns through it, and a signed pointer is not a target;
- *  - and a probe that replaced the signing instruction instead does not help either: the
- *    callee's epilogue authenticates whatever x30 holds by then, which is the trampoline this
- *    module does not own.
+ *  - at +4 x30 is unusable only when the entry itself signed it.  paciasp/pacibsp run before the
+ *    probe and leave a MAC above the address bits (measured on a vendor 5.15: pc
+ *    0xeac70440080aff08), and a kretprobe that stores that as ri->ret_addr returns into nothing;
+ *  - replacing the signing instruction does not help either: the callee's epilogue authenticates
+ *    whatever x30 holds by then, which is the trampoline this module does not own.
  *
- * None of the offsets is safe, so the caller is told instead of being handed one.  The feature
- * stays off with a log that names it, rather than taking panic_on_oops down with it.  The
- * targets this affects: the sys_call_table wrappers reached through invoke_syscall(),
+ * The entry's own word decides, in three states - a guess here is a panic on panic_on_oops=1:
+ *  - paciasp/pacibsp in +0: refuse.  Every __arm64_sys_* wrapper on this build's 5.15/6.1/6.6
+ *    targets starts that way, so this is the state that keeps five features off;
+ *  - a landing pad without a signature: +4 is the plain upstream shape, where x30 still holds the
+ *    caller's address.  Arm it.  No shipped target reaches this state today, which is the point:
+ *    the rule follows the kernel instead of the kernel list in this file;
+ *  - a word this build cannot classify: refuse and say which word it was, because arming at +4
+ *    would skip a real instruction if that word is not a landing pad at all.
+ *
+ * The targets this affects: the sys_call_table wrappers reached through invoke_syscall(),
  * map_files_get_link through i_op->get_link, and single_open()'s seq_show through seq_ops->show.
  */
-static inline int susfs_kr_refuse_indirect_at(unsigned long fn, const char *name)
+static inline int susfs_kr_set_indirect_addr_at(struct kretprobe *krp, unsigned long fn,
+						const char *name)
 {
 	u32 insn = 0;
-	bool signed_entry;
 
 	if (!fn) {
-		pr_warn("susfs_krp: %s was not found - not arming a kretprobe on it\n", name);
+		SUSFS_LOGW("susfs_krp: %s was not found - not arming a kretprobe on it\n", name);
 		return -ENOENT;
 	}
-	signed_entry = !copy_from_kernel_nofault(&insn, (void *)fn, sizeof(insn)) &&
-		       susfs_arm64_is_pac(insn);
-	pr_warn("susfs_krp: %s is reached through a pointer: at +0 the breakpoint would take the "
-		"landing pad away, at +4 x30 is %s, and a kretprobe returns through the address it "
-		"finds there - not arming one\n", name,
-		signed_entry ? "already signed by the entry" :
-		"replaced by the trampoline the callee then authenticates");
-	return -EOPNOTSUPP;
+	if (copy_from_kernel_nofault(&insn, (void *)fn, sizeof(insn))) {
+		SUSFS_LOGW("susfs_krp: %s: the entry is not readable - not arming a kretprobe on it\n",
+			   name);
+		return -EFAULT;
+	}
+	if (susfs_arm64_is_pac(insn)) {
+		SUSFS_LOGW("susfs_krp: %s opens with 0x%08x, which signs the link register: at +0 a "
+			   "breakpoint would take the landing pad away, at +4 the kretprobe would return "
+			   "through that signature - not arming one\n", name, insn);
+		return -EOPNOTSUPP;
+	}
+	if (!susfs_arm64_insn_is_pad(insn)) {
+		SUSFS_LOGW("susfs_krp: %s opens with 0x%08x, which this build cannot place: arming at "
+			   "+4 would skip a real instruction if that word is not a landing pad - not "
+			   "arming one\n", name, insn);
+		return -EOPNOTSUPP;
+	}
+	krp->kp.addr = (kprobe_opcode_t *)(fn + sizeof(insn));
+	SUSFS_LOGI("susfs_krp: %s+0x%lx\n", name, sizeof(insn));
+	return 0;
 }
 
-static inline int susfs_kr_refuse_indirect(const char *name)
+static inline int susfs_kr_set_indirect_addr(struct kretprobe *krp, const char *name)
 {
-	return susfs_kr_refuse_indirect_at(find_kernel_symbol_exact(name), name);
+	return susfs_kr_set_indirect_addr_at(krp, find_kernel_symbol_exact(name), name);
 }
 
 #endif /* _SUSFS_KPROBE_H */

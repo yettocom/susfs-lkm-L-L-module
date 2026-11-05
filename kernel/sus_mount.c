@@ -1299,7 +1299,7 @@ static int sus_mount_fdinfo_arm(void)
         struct kretprobe *kr = &kr_fdinfo[i];
         int rc;
 
-        rc = susfs_kr_refuse_indirect_at(addrs[i], "seq_show");
+        rc = susfs_kr_set_indirect_addr_at(kr, addrs[i], "seq_show");
         if (rc) {
             pr_warn("sus_mount: seq_show @%px is not probeable %d - that file keeps printing "
                     "the real mnt_id\n", (void *)addrs[i], rc);
@@ -1429,7 +1429,7 @@ static int sus_mount_statx_ret(struct kretprobe_instance *ri, struct pt_regs *re
 }
 
 /* No .kp.symbol_name: __arm64_sys_statx is reached through sys_call_table[], and a kretprobe
- * cannot be armed on an indirect-call target at all - see susfs_kr_refuse_indirect() in
+ * is refused only where the entry itself signs the link register - see susfs_kr_set_indirect_addr() in
  * susfs_kprobe.h, which is what this reports. */
 static struct kretprobe kr_statx = {
     .entry_handler = sus_mount_statx_entry_sys,
@@ -2709,7 +2709,7 @@ static int sus_mount_register(void)
     rc = sus_mount_fdinfo_arm();
     if (rc)
         pr_warn("sus_mount: the fdinfo probe could not be armed %d - /proc/<pid>/fdinfo keeps printing the real mnt_id\n", rc);
-    rc = susfs_kr_refuse_indirect("__arm64_sys_statx");
+    rc = susfs_kr_set_indirect_addr(&kr_statx, "__arm64_sys_statx");
     if (!rc)
         rc = register_kretprobe(&kr_statx);
     if (rc) {
