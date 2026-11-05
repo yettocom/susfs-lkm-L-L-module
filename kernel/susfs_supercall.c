@@ -28,6 +28,7 @@
 #include "susfs.h"
 #include "susfs_fp_hook.h"
 #include "symbol_resolver.h"
+#include "susfs_kprobe.h"
 #include "susfs_arm64.h"
 
 struct susfs_tw {
@@ -341,7 +342,7 @@ static struct susfs_fp_hook reboot_hook = {
  * sus_mount use.  susfs_supercall_init() only reaches it when the table hook could not arm.
  *
  * This path probes a function the sys_call_table reaches INDIRECTLY, which is the one shape a kprobe
- * cannot take at offset 0 on a BTI kernel - see reboot_kprobe_target().  An earlier version of this
+ * cannot take at offset 0 on a BTI kernel - see susfs_kp_set_indirect_addr().  An earlier version of this
  * comment claimed such kernels "take neither and the layer fails"; they did not, and the breakpoint
  * that was armed instead killed the device on its first reboot(2).  The refusal is real now. */
 static int reboot_pre(struct kprobe *kp, struct pt_regs *regs)
@@ -408,78 +409,20 @@ static int reboot_pre(struct kprobe *kp, struct pt_regs *regs)
 	 * __arm64_sys_reboot and return 0 - with these magic values reboot would otherwise
 	 * return -EINVAL, and the prebuilt ksu_susfs tool checks the syscall result.  The
 	 * command itself still runs from task_work before we return to userspace. */
-	regs->pc = regs->regs[30];
+	susfs_kp_skip_syscall(regs);
 	regs->regs[0] = 0;
 	return 1;
 }
 
-/* No .symbol_name: reboot_kprobe_target() resolves and adjusts the address itself, and
+/* No .symbol_name: susfs_kp_set_indirect_addr() resolves and adjusts the address, and
  * register_kprobe() BUGs on a probe that carries both an address and a name. */
 static struct kprobe reboot_kp = {
 	.pre_handler = reboot_pre,
 };
 
-/* Where the fallback probe may sit on a function the sys_call_table reaches.
- *
- * invoke_syscall() loads the table entry and calls it - an indirect call, and under BTI the CPU
- * checks the first instruction of the target before it runs.  A kprobe puts its breakpoint ON the
- * probed instruction, so a probe at offset 0 replaces the landing pad itself: the next reboot(2)
- * raises a branch-type exception (BTYPE=-c) and, with panic_on_oops=1, takes the device down.
- * That is not hypothetical - it is how one reboot(2) from userspace killed a Samsung 5.15 device
- * with this layer loaded, and this function is the repair.
- *
- * So step over the landing pad and probe the word behind it.  Which word that is gets decided at
- * run time, from the instruction, never from a CONFIG: the module is built against a DDK image
- * whose config is not the device's, and the loader checks vermagic only.  A word outside that set is
- * NOT read as "no pad here": a Samsung 5.15 device opened __arm64_sys_reboot with an unrecognised
- * word while every other syscall in the same table carried a pad, and probing offset 0 there put the
- * breakpoint on the landing pad itself, so the next reboot(2) raised BTYPE=-c and the device
- * panicked.  A recognised pad earns a step-over; anything else refuses.
- *
- * Returns 0 and writes *target, or -ENOENT/-EFAULT/-EINVAL.  The caller must NOT arm a probe on any
- * failure: a breakpoint on the wrong word is a device that panics on its next reboot(2), which is
- * exactly the outcome this function exists to prevent. */
-static int reboot_kprobe_target(unsigned long *target)
-{
-	static const char *const name = "__arm64_sys_reboot";
-	unsigned long base, fn;
-	u32 insn;
-
-	fn = find_kernel_symbol_exact(name);
-	if (!fn) {
-		pr_err("susfs supercall: %s is not in kallsyms, cannot place the fallback probe\n", name);
-		return -ENOENT;
-	}
-	base = fn;
-	if (copy_from_kernel_nofault(&insn, (void *)fn, sizeof(insn))) {
-		pr_err("susfs supercall: cannot read the %s entry, refusing to arm a probe there\n", name);
-		return -EFAULT;
-	}
-	/* Only a pad this build recognises earns a step-over - see the note above the function. */
-	if (!susfs_arm64_insn_is_pad(insn)) {
-		pr_err("susfs supercall: the %s entry opens with 0x%08x, not a landing pad this build knows;\n"
-		       " refusing to arm a probe there\n", name, insn);
-		return -EINVAL;
-	}
-	fn += sizeof(insn);
-	if (copy_from_kernel_nofault(&insn, (void *)fn, sizeof(insn))) {
-		pr_err("susfs supercall: cannot read the word behind the %s landing pad, refusing to arm a probe there\n",
-		       name);
-		return -EFAULT;
-	}
-	/* reboot_pre() answers a handled supercall with regs->pc = regs->regs[30].  Behind a
-	 * paciasp/pacibsp that register already holds a signed pointer and jumping to it faults, so
-	 * a probe there would trade a BTI panic for a PAC one. */
-	if (susfs_arm64_is_pac(insn)) {
-		pr_err("susfs supercall: %s signs its link register at +4, so a probe there cannot skip\n"
-		       " the call; refusing to arm one\n", name);
-		return -EINVAL;
-	}
-
-	*target = fn;
-	SUSFS_LOGI("susfs supercall: fallback probe at %s+0x%lx\n", name, fn - base);
-	return 0;
-}
+/* The fallback probe sits on a function the sys_call_table reaches indirectly, so it goes
+ * behind the landing pad.  susfs_kp_set_indirect_addr() in susfs_kprobe.h owns that rule, for
+ * this probe and for every other probe in the module aimed at an indirect-call target. */
 
 static bool sc_registered;	/* sys_call_table path armed */
 static bool sc_kp_registered;	/* kprobe fallback armed */
@@ -532,7 +475,6 @@ static void __init susfs_abi_layout_check(void)
 
 int susfs_supercall_init(void)
 {
-	unsigned long addr;
 	int rc;
 
 	susfs_abi_layout_check();
@@ -546,13 +488,12 @@ int susfs_supercall_init(void)
 
 	/* The table could not be hooked (pKVM EL2-protected sys_call_table: no landing pad).  Fall
 	 * back to the kprobe, which does not touch the table - but the entry it would probe is an
-	 * indirect-call target, so reboot_kprobe_target() picks the word, and a failure there means
+	 * indirect-call target, so susfs_kp_set_indirect_addr() picks the word, and a failure there means
 	 * no probe at all rather than one on the landing pad.  See its comment. */
 	pr_warn("susfs supercall: sys_call_table reboot hook failed %d, trying kprobe fallback\n", rc);
-	rc = reboot_kprobe_target(&addr);
+	rc = susfs_kp_set_indirect_addr(&reboot_kp, "__arm64_sys_reboot");
 	if (rc)
 		return rc;
-	reboot_kp.addr = (kprobe_opcode_t *)addr;
 	rc = register_kprobe(&reboot_kp);
 	if (rc) {
 		pr_warn("susfs supercall: register_kprobe(reboot) failed %d\n", rc);

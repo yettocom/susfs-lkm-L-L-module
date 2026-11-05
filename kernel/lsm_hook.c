@@ -856,7 +856,7 @@ static int susfs_lsm_kprobe_pre(struct kprobe *p, struct pt_regs *regs)
         return 0;
 
     regs->regs[0] = (unsigned long)ret;              /* arm64 return value is x0 */
-    instruction_pointer_set(regs, regs->regs[30]);   /* return to the caller at once */
+    susfs_kp_skip_call(regs);   /* return to the caller at once */
     return 1;
 }
 

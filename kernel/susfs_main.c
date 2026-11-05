@@ -14,11 +14,13 @@
 #include <linux/proc_fs.h>	/* proc_create() for /proc/susfs_status */
 #include <linux/seq_file.h>	/* single_open()/seq_read() for the same node */
 #include <linux/cred.h>		/* current_uid(): the status node's own gate, without KernelSU */
+#include <linux/uaccess.h>	/* copy_from_kernel_nofault(): reading invoke_syscall's body */
 
 #include "symbol_resolver.h"
 #include "ksu_allow_gate.h"	/* susfs_ksu_allow_kind: whether ksu_file applies at all */
 #include "patch_memory.h"	/* ksu_patch_memory_init(): the flush helper's name differs per kernel */
 #include "susfs_log.h"
+#include "susfs_arm64.h"	/* SUSFS_ARM64_BLR_X20 / SUSFS_ARM64_RET: the resume-point scan */
 #include "ksu_umount_gate.h"
 #include "ksu_allow_gate.h"	/* KernelSU's allow predicate: the control-node gate */
 #include "btf_layout.h"		/* the SELinux inode_security_struct.sid offset, by BTF */
@@ -568,6 +570,56 @@ static int susfs_load_layer(int id, bool fatal)
     return 0;
 }
 
+/* Where a pre_handler resumes when it decides the syscall must not run.  Zero until the scan
+ * below finds a single indirect call to point at; handlers then strip x30 instead - see
+ * susfs_kp_skip_syscall() in susfs_kprobe.h. */
+unsigned long susfs_skip_resume_pc;
+
+/*
+ * invoke_syscall() reaches every __arm64_sys_* wrapper through one `blr x20`.  The word after it
+ * is where the caller continues once the syscall returns, and unlike x30 it carries no
+ * pointer-authentication signature - which is the whole reason this exists.
+ *
+ * The scan stops at the first `ret`, so a function without such a call cannot walk into its
+ * neighbour and pick up an address that belongs there; a second `blr x20` before the ret means
+ * the two cannot be told apart, and guessing is worse than the strip fallback.
+ */
+static void susfs_skip_resolve(void)
+{
+    unsigned long addr = find_kernel_symbol_exact("invoke_syscall");
+    unsigned long hit = 0;
+    u32 insn;
+    int i;
+
+    if (!addr) {
+        pr_warn("susfs skip: invoke_syscall not found - a skipped call falls back to "
+                "stripping x30\n");
+        return;
+    }
+    for (i = 0; i < 0x100; i++) {
+        if (copy_from_kernel_nofault(&insn, (void *)(addr + (unsigned long)i * 4),
+                                     sizeof(insn)))
+            break;
+        if (insn == SUSFS_ARM64_RET)
+            break;
+        if (insn != SUSFS_ARM64_BLR_X20)
+            continue;
+        if (hit) {
+            pr_warn("susfs skip: invoke_syscall has more than one indirect call - "
+                    "a skipped call falls back to stripping x30\n");
+            return;
+        }
+        hit = addr + (unsigned long)i * 4 + 4;
+    }
+    if (!hit) {
+        pr_warn("susfs skip: invoke_syscall has no indirect call - a skipped call "
+                "falls back to stripping x30\n");
+        return;
+    }
+    susfs_skip_resume_pc = hit;
+    SUSFS_LOGI("skip resume point %px (invoke_syscall+0x%lx)\n", (void *)hit, hit - addr);
+}
+
 static int __init susfs_init(void)
 {
     int i;
@@ -581,6 +633,10 @@ static int __init susfs_init(void)
 
     SUSFS_LOGI("init v%s\n", SUSFS_LKM_VERSION);
     ksu_init_symbol_resolver();
+
+    /* Now that kallsyms answers, find where a skipped syscall has to resume.  Not fatal:
+     * the handlers have a fallback that needs no symbol at all. */
+    susfs_skip_resolve();
 
     /* Now that kallsyms lookups work, check the addresses themselves: see imports_guard.c. */
     if (susfs_imports_crosscheck())

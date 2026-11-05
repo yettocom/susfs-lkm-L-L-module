@@ -365,7 +365,9 @@ int susfs_rkp_branch_patch_callthru(void *dst, void *src, void **callthru)
 		mutex_unlock(&rkp_site_lock);
 		/* Print the words themselves: a device showed this on __arm64_sys_reboot while every
 		 * other syscall in the same table carried a landing pad, and the next report has to
-		 * name that word before the pad set here can be widened. */
+		 * name that word before the pad set here can be widened.  A first word that is itself
+		 * a breakpoint reads the same here - another module reached the entry first - which is
+		 * why the word is printed rather than inferred. */
 		pr_err("rkp: %pS: no landing pad at the entry (0x%08x 0x%08x), not installing\n",
 		       fn, fn0_insn, *(u32 *)((u8 *)fn + 4));
 		return -EINVAL;

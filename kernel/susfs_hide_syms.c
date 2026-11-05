@@ -607,13 +607,13 @@ static int hide_syms_s_show_pre(struct kprobe *kp, struct pt_regs *regs)
 	if (name_should_hide(iter->name)) {
 		atomic_inc(&hide_hit_count);
 		regs->regs[0] = 0;              /* s_show returns 0 */
-		regs->pc = regs->regs[30];      /* skip the line */
+		susfs_kp_skip_call(regs);      /* skip the line */
 		return 1;
 	}
 	if (iter->module_name[0] && hide_module_name_match(iter->module_name)) {
 		atomic_inc(&n_kallsyms_mod_skipped);
 		regs->regs[0] = 0;
-		regs->pc = regs->regs[30];
+		susfs_kp_skip_call(regs);
 		return 1;
 	}
 	return 0;
@@ -662,7 +662,7 @@ static int hide_syms_m_show_pre(struct kprobe *kp, struct pt_regs *regs)
 
 	atomic_inc(&n_modlines_skipped);
 	regs_set_return_value(regs, 0);		/* no output for this entry */
-	regs->pc = regs->regs[30];
+	susfs_kp_skip_call(regs);
 	return 1;
 }
 
@@ -728,7 +728,19 @@ static int __nocfi noinline hide_syms_resolve_show(struct kprobe *kp,
 				table_name, (void *)show, (void *)target);
 	}
 
-	kp->addr = (kprobe_opcode_t *)target;
+	if (target != show) {
+		/* A body behind an entry stub is reached by a direct branch, so it has no landing
+		 * pad of its own and the probe belongs on its first instruction. */
+		kp->addr = (kprobe_opcode_t *)target;
+	} else {
+		/* .show names the function itself, which makes it the word the table's indirect
+		 * call lands on - arming at offset 0 would replace its pad.  susfs_kprobe.h owns
+		 * that rule, including the refusal when the word behind the pad is signed. */
+		int rc = susfs_kp_set_indirect_addr_at(kp, target, symbol_name);
+
+		if (rc)
+			return rc;
+	}
 	*table_out = op;
 	SUSFS_LOGI("susfs_hide_syms: %s.show=%px, probe body=%px\n",
 			table_name, (void *)show, (void *)target);
@@ -774,10 +786,14 @@ int susfs_hide_syms_init(void)
 		 * m->op identity check is off and that hide_syms_iter_plausible() is the only gate; and
 		 * .addr is cleared explicitly so the two fields are never set at once (that pair is what
 		 * the kernel refuses with -EINVAL). */
-		SUSFS_LOGI("susfs_hide_syms: kallsyms_op.show could not be validated (%d) - arming s_show BY NAME instead: the m->op check is OFF for this probe, so hide_syms_iter_plausible() is the only gate (if the name selects another s_show, that file can lose a line, and kallsyms hiding stays off)\n",
+		SUSFS_LOGI("susfs_hide_syms: kallsyms_op.show could not be validated (%d) - arming s_show behind its landing pad instead: the m->op check is OFF for this probe, so hide_syms_iter_plausible() is the only gate (if the name selects another s_show, that file can lose a line, and kallsyms hiding stays off)\n",
 				rc);
-		kp_s_show.addr = NULL;
-		kp_s_show.symbol_name = "s_show";
+		rc = susfs_kp_set_indirect_addr(&kp_s_show, "s_show");
+		if (rc) {
+			pr_warn("susfs_hide_syms: s_show cannot be armed behind its landing pad (%d) - "
+					"/proc/kallsyms keeps listing susfs_/ksu_ symbols\n", rc);
+			return rc;
+		}
 	}
 	rc = register_kprobe(&kp_s_show);
 	if (rc) {
@@ -798,10 +814,14 @@ int susfs_hide_syms_init(void)
 			&modules_op_target);
 	if (rc) {
 		/* Same fallback as s_show, same reason: by name, with modules_op_target left NULL. */
-		SUSFS_LOGI("susfs_hide_syms: modules_op.show could not be validated (%d) - arming m_show BY NAME instead\n",
+		SUSFS_LOGI("susfs_hide_syms: modules_op.show could not be validated (%d) - arming m_show behind its landing pad instead\n",
 				rc);
-		kp_m_show.addr = NULL;
-		kp_m_show.symbol_name = "m_show";
+		rc = susfs_kp_set_indirect_addr(&kp_m_show, "m_show");
+		if (rc) {
+			pr_warn("susfs_hide_syms: m_show cannot be armed behind its landing pad (%d) - "
+					"/proc/modules keeps listing the modules in hide_modules\n", rc);
+			return rc;
+		}
 	}
 	rc = register_kprobe(&kp_m_show);
 	if (rc) {

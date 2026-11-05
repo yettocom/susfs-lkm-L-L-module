@@ -69,8 +69,10 @@ static int kr_newuname_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
     return 0;
 }
 
+/* No .kp.symbol_name: __arm64_sys_newuname is what sys_call_table[] holds, so invoke_syscall()
+ * reaches it through a pointer and the probe belongs behind its landing pad - see
+ * susfs_kp_set_indirect_addr() in susfs_kprobe.h. */
 static struct kretprobe krp = {
-    .kp.symbol_name = "__arm64_sys_newuname",
     .entry_handler = kr_newuname_entry,
     .handler = kr_newuname_ret,
     .data_size = sizeof(struct uname_args),
@@ -95,7 +97,9 @@ static int uname_register(void)
         mutex_unlock(&uname_ctl_lock);
         return 0;
     }
-    rc = register_kretprobe(&krp);
+    rc = susfs_kp_set_indirect_addr(&krp.kp, "__arm64_sys_newuname");
+    if (!rc)
+        rc = register_kretprobe(&krp);
     if (rc) {
         /* CMD_SUSFS_SET_UNAME can be sent again after a failure, and the address the kernel
          * resolved is already in the struct: without this the retry is refused with -EINVAL

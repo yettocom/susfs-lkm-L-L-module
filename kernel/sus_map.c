@@ -269,7 +269,7 @@ static int sus_map_skip_vma_pre(struct kprobe *kp, struct pt_regs *regs)
 	if (!sus_map_hide_vma(vma, kp->symbol_name))
 		return 0;
 	regs_set_return_value(regs, 0);
-	regs->pc = regs->regs[30];
+	susfs_kp_skip_call(regs);
 	return 1;
 }
 
@@ -474,7 +474,7 @@ static bool sus_map_walk_answer(struct kprobe *kp, struct pt_regs *regs,
      * that from a skipped walk (upstream's own skip leaves the same value).  Leaving
      * x0 = mm would turn pagemap_read()'s `ret` into a kernel pointer handed to read(2). */
     regs_set_return_value(regs, 0);
-    regs->pc = regs->regs[30];
+    susfs_kp_skip_call(regs);
     return true;
 }
 
@@ -665,7 +665,7 @@ static int sus_map_vm_access_pre(struct kprobe *kp, struct pt_regs *regs)
 
     atomic_inc(&n_vm_hides);
     regs_set_return_value(regs, 0);     /* "nothing transferred" */
-    regs->pc = regs->regs[30];          /* skip the call: nothing is pinned */
+    susfs_kp_skip_call(regs);          /* skip the call: nothing is pinned */
     return 1;
 }
 
@@ -781,8 +781,9 @@ static int sus_map_maplink_ret(struct kretprobe_instance *ri, struct pt_regs *re
     return 0;
 }
 
+/* No .kp.symbol_name: map_files_get_link is reached through inode->i_op->get_link, an indirect
+ * call that checks the target's landing pad - see susfs_kp_set_indirect_addr() in susfs_kprobe.h. */
 static struct kretprobe kr_map_files = {
-    .kp.symbol_name = "map_files_get_link",
     .entry_handler = sus_map_maplink_entry,
     .handler = sus_map_maplink_ret,
     .data_size = sizeof(unsigned long),	/* the output struct path * */
@@ -962,7 +963,10 @@ static int sus_map_register_probes(void)
     /* The map_files hook is a kretprobe, so it lives outside map_probes[] (which
      * holds struct kprobe *) and is tracked on its own; optional like the rest. */
     if (!kr_map_files_ok) {
-        int rc = register_kretprobe(&kr_map_files);
+        int rc = susfs_kp_set_indirect_addr(&kr_map_files.kp, "map_files_get_link");
+
+        if (!rc)
+            rc = register_kretprobe(&kr_map_files);
 
         if (rc) {
             susfs_krp_forget_addr(&kr_map_files);

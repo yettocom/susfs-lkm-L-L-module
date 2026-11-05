@@ -1299,7 +1299,12 @@ static int sus_mount_fdinfo_arm(void)
         struct kretprobe *kr = &kr_fdinfo[i];
         int rc;
 
-        kr->kp.addr = (void *)addrs[i];
+        rc = susfs_kp_set_indirect_addr_at(&kr->kp, addrs[i], "seq_show");
+        if (rc) {
+            pr_warn("sus_mount: seq_show @%px is not probeable %d - that file keeps printing "
+                    "the real mnt_id\n", (void *)addrs[i], rc);
+            continue;
+        }
         kr->entry_handler = sus_mount_fdinfo_entry;
         kr->handler = sus_mount_fdinfo_ret;
         kr->data_size = sizeof(struct sus_mount_kretprobe_state);
@@ -1423,8 +1428,9 @@ static int sus_mount_statx_ret(struct kretprobe_instance *ri, struct pt_regs *re
     return 0;
 }
 
+/* No .kp.symbol_name: __arm64_sys_statx is reached through sys_call_table[], so the probe has to
+ * sit behind its landing pad - susfs_kp_set_indirect_addr() in susfs_kprobe.h places it. */
 static struct kretprobe kr_statx = {
-    .kp.symbol_name = "__arm64_sys_statx",
     .entry_handler = sus_mount_statx_entry_sys,
     .handler = sus_mount_statx_ret,
     .data_size = sizeof(struct sus_mount_kretprobe_state),
@@ -1550,7 +1556,7 @@ static int sus_mount_show_pre(struct kprobe *kp, struct pt_regs *regs)
         return 0;
     sus_mount_note_id(r);
     atomic_inc(&n_ident_hits);
-    regs->pc = regs->regs[30];   /* skip this mount line */
+    susfs_kp_skip_call(regs);   /* skip this mount line */
     /* These show_* callbacks return int and x0 still holds seq_file*.
      * seq_read() treats a negative return as a hard error, so a stray high
      * bit here would break the whole read; upstream's equivalent site
@@ -1559,13 +1565,15 @@ static int sus_mount_show_pre(struct kprobe *kp, struct pt_regs *regs)
     return 1;
 }
 
+/* No .symbol_name on any of the three: show_vfsstat/show_mountinfo/show_vfsmnt are what
+ * seq_ops->show points at, seq_read() calls them through that pointer, and a breakpoint on their
+ * first instruction removes the landing pad the indirect call needs.  Their addresses come from
+ * susfs_kp_set_indirect_addr() in susfs_kprobe.h. */
 static struct kprobe kp_vfsstat = {
-    .symbol_name = "show_vfsstat",
     .pre_handler = sus_mount_show_pre,
 };
 
 static struct kprobe kp_mountinfo = {
-    .symbol_name = "show_mountinfo",
     .pre_handler = sus_mount_show_pre,
 };
 
@@ -1575,7 +1583,6 @@ static struct kprobe kp_mountinfo = {
  * all three (patch:1402 susfs_show_vfsmnt, :1439 susfs_show_mountinfo, :1504
  * susfs_show_vfsstat). */
 static struct kprobe kp_vfsmnt = {
-    .symbol_name = "show_vfsmnt",
     .pre_handler = sus_mount_show_pre,
 };
 
@@ -2674,7 +2681,9 @@ static int sus_mount_register(void)
      * armed is on mount_stat as `show_probes=<n>/3`, which makes a partial hide visible instead
      * of silently smaller.  Only "none of the three" is fatal. */
     for (i = 0; i < SUS_MOUNT_SHOW_N; i++) {
-        rc = register_kprobe(sus_mount_show_probes[i]);
+        rc = susfs_kp_set_indirect_addr(sus_mount_show_probes[i], sus_mount_show_names[i]);
+        if (!rc)
+            rc = register_kprobe(sus_mount_show_probes[i]);
         if (rc) {
             pr_warn("sus_mount: register_kprobe(%s) failed %d - that file keeps showing our mounts\n",
                     sus_mount_show_names[i], rc);
@@ -2699,7 +2708,9 @@ static int sus_mount_register(void)
     rc = sus_mount_fdinfo_arm();
     if (rc)
         pr_warn("sus_mount: the fdinfo probe could not be armed %d - /proc/<pid>/fdinfo keeps printing the real mnt_id\n", rc);
-    rc = register_kretprobe(&kr_statx);
+    rc = susfs_kp_set_indirect_addr(&kr_statx.kp, "__arm64_sys_statx");
+    if (!rc)
+        rc = register_kretprobe(&kr_statx);
     if (rc) {
         susfs_krp_forget_addr(&kr_statx);
         pr_warn("sus_mount: register_kretprobe(__arm64_sys_statx) failed %d - statx keeps returning the real stx_mnt_id\n", rc);
