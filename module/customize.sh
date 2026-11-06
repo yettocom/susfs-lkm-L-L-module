@@ -27,9 +27,12 @@ touch "$MODPATH/skip_mount"
 # installed below; all of its logic lives in this module (trampoline/susfs-lkm-unload.sh), and
 # uninstall.sh removes it again.  See README.md, "Flashing as a KernelSU module".
 POSTFS_DIR=/data/adb/post-fs-data.d
-mkdir -p "$POSTFS_DIR"
-cp -f "$MODPATH/trampoline/susfs-lkm-unload.sh" "$POSTFS_DIR/susfs-lkm-unload.sh"
-set_perm "$POSTFS_DIR/susfs-lkm-unload.sh" 0 0 0755
+if mkdir -p "$POSTFS_DIR" && cp -f "$MODPATH/trampoline/susfs-lkm-unload.sh" \
+     "$POSTFS_DIR/susfs-lkm-unload.sh"; then
+  set_perm "$POSTFS_DIR/susfs-lkm-unload.sh" 0 0 0755
+else
+  ui_print "- warning: $POSTFS_DIR is not writable; disable will not unload the LKM"
+fi
 
 # The "installed but not activated" status is NOT written here: ksud copies the ZIP's module.prop
 # over the installed one after customize.sh has run (module.rs: move the staged dir into place), so
