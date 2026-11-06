@@ -165,28 +165,60 @@ static inline int susfs_kp_set_indirect_addr(struct kprobe *kp, const char *name
  */
 extern unsigned long susfs_skip_resume_pc;
 
-static inline void susfs_kp_skip_call(struct pt_regs *regs)
+/* Set once at load by susfs_arm64_pac_selftest().  A core that cannot round-trip a
+ * signature must not have a call taken away on the strength of a stripped register. */
+extern bool susfs_pac_strip_ok;
+
+/*
+ * Take the call this probe sits in away and return to its caller.  False means no address
+ * could be vouched for, and the handler must then let the call run: skipping is a courtesy
+ * that hides output, while a jump to an unverified value is an instruction abort under
+ * panic_on_oops=1.
+ *
+ * The cases, cheapest first:
+ *  - x30 as it stands is kernel text: nothing signed it (the entry was a plain bti);
+ *  - the A key authenticates it back into kernel text: pac-ret entry, the usual case;
+ *  - the B key does: a build that signs with the B key.
+ * A signed value never passes kernel_text_address() - the MAC sits above the address bits
+ * - so "the strip did not work" and "it was never signed" cannot be confused, and the
+ * raw x30 is only used after that same test.
+ */
+static inline bool susfs_kp_skip_call(struct pt_regs *regs)
 {
 	unsigned long lr = regs->regs[30];
-	unsigned long stripped = susfs_arm64_pac_strip_key_a(lr, regs->sp);
+	unsigned long stripped;
 
-	/* AUTIA over a value that was never signed yields a mixture, not that value, so a result
-	 * is only trusted when the kernel would execute from it.  Both keys are tried: pac-ret
-	 * signs with the A key, and ruling out the B key costs one instruction. */
-	if (!kernel_text_address(stripped)) {
-		unsigned long other = susfs_arm64_pac_strip_key_b(lr, regs->sp);
-
-		stripped = kernel_text_address(other) ? other : lr;
+	if (kernel_text_address(lr)) {
+		regs->pc = lr;
+		return true;
 	}
-	regs->pc = stripped;
+	if (susfs_pac_strip_ok) {
+		stripped = susfs_arm64_pac_strip_key_a(lr, regs->sp);
+		if (kernel_text_address(stripped)) {
+			regs->pc = stripped;
+			return true;
+		}
+		stripped = susfs_arm64_pac_strip_key_b(lr, regs->sp);
+		if (kernel_text_address(stripped)) {
+			regs->pc = stripped;
+			return true;
+		}
+	}
+	SUSFS_LOGE("susfs_kp: no address for the caller of the probe at %px (x30 %px is not "
+		   "text even after autia/autib) - running the call instead\n",
+		   (void *)regs->pc, (void *)lr);
+	return false;
 }
 
-static inline void susfs_kp_skip_syscall(struct pt_regs *regs)
+/* The syscall family resumes at a constant found at load, so nothing here reads x30.
+ * It still answers with a bool: a handler must not skip by accident when the constant is
+ * missing, and susfs_supercall_init() refuses to arm in that case. */
+static inline bool susfs_kp_skip_syscall(struct pt_regs *regs)
 {
-	if (susfs_skip_resume_pc)
-		regs->pc = susfs_skip_resume_pc;
-	else
-		susfs_kp_skip_call(regs);
+	if (!susfs_skip_resume_pc)
+		return false;
+	regs->pc = susfs_skip_resume_pc;
+	return true;
 }
 
 /*

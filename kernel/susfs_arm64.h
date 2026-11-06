@@ -99,7 +99,13 @@ static inline bool susfs_arm64_fn_has_landing_pad(const void *fn)
  * ThinLTO and the LTO backend assembles inline asm without the -mbranch-protection the kernel
  * compiles its C with, so "autia" is refused there with "instruction requires: pauth" even on an
  * image that has CONFIG_ARM64_PTR_AUTH_KERNEL=y.  The architecture fixes the encoding and .inst
- * reaches the object as written: autia x9, x10 = 0xdac10149, autib x9, x10 = 0xdac10549.
+ * reaches the object as written: autia x9, x10 = 0xdac11149, autib x9, x10 = 0xdac11549.
+ *
+ * Those two words were 0xdac10149/0xdac10549 for one release - the PACIA/PACIB encodings,
+ * one bit apart (0xDAC10xxx signs, 0xDAC11xxx authenticates) - so a "strip" re-signed the
+ * pointer instead of authenticating it, and every skip that fell back to it jumped to the
+ * mixed value.  The sign helpers below keep those words on purpose, so that
+ * susfs_arm64_pac_selftest() pins the pair against the core that is running.
  */
 static __always_inline unsigned long susfs_arm64_pac_strip_key_a(unsigned long addr,
 							 unsigned long sp)
@@ -109,7 +115,7 @@ static __always_inline unsigned long susfs_arm64_pac_strip_key_a(unsigned long a
 	 * read-write, which keeps them out of the two registers named below. */
 	asm volatile("mov\tx10, %1\n"
 		     "mov\tx9, %0\n"
-		     ".inst\t0xdac10149\n"	/* autia x9, x10 */
+		     ".inst\t0xdac11149\n"	/* autia x9, x10 */
 		     "mov\t%0, x9"
 		     : "+r" (addr), "+r" (sp)
 		     :
@@ -122,12 +128,57 @@ static __always_inline unsigned long susfs_arm64_pac_strip_key_b(unsigned long a
 {
 	asm volatile("mov\tx10, %1\n"
 		     "mov\tx9, %0\n"
-		     ".inst\t0xdac10549\n"	/* autib x9, x10 */
+		     ".inst\t0xdac11549\n"	/* autib x9, x10 */
 		     "mov\t%0, x9"
 		     : "+r" (addr), "+r" (sp)
 		     :
 		     : "x9", "x10", "memory");
 	return addr;
+}
+
+/* The two signing words, kept here so the round trip below measures the running core rather
+ * than trusting a comment: pacia x9, x10 = 0xdac10149, pacib x9, x10 = 0xdac10549. */
+static __always_inline unsigned long susfs_arm64_pac_sign_key_a(unsigned long addr,
+							 unsigned long sp)
+{
+	asm volatile("mov\tx10, %1\n"
+		     "mov\tx9, %0\n"
+		     ".inst\t0xdac10149\n"	/* pacia x9, x10 */
+		     "mov\t%0, x9"
+		     : "+r" (addr), "+r" (sp)
+		     :
+		     : "x9", "x10", "memory");
+	return addr;
+}
+
+static __always_inline unsigned long susfs_arm64_pac_sign_key_b(unsigned long addr,
+							 unsigned long sp)
+{
+	asm volatile("mov\tx10, %1\n"
+		     "mov\tx9, %0\n"
+		     ".inst\t0xdac10549\n"	/* pacib x9, x10 */
+		     "mov\t%0, x9"
+		     : "+r" (addr), "+r" (sp)
+		     :
+		     : "x9", "x10", "memory");
+	return addr;
+}
+
+/*
+ * Sign one pointer with each key and require the original back.  This is the check that
+ * would have caught the swapped encodings at load: a signing word where an authenticating
+ * word belongs returns a re-signed value, never its input.  A kernel without PAC executes
+ * both as NOPs and the round trip holds trivially - correct, because x30 is not signed
+ * there either.  Both keys are checked: a build that signs with the B key exists.
+ */
+static __always_inline bool susfs_arm64_pac_selftest(void)
+{
+	unsigned long sample = (unsigned long)&sample;
+
+	return susfs_arm64_pac_strip_key_a(
+			susfs_arm64_pac_sign_key_a(sample, sample), sample) == sample &&
+	       susfs_arm64_pac_strip_key_b(
+			susfs_arm64_pac_sign_key_b(sample, sample), sample) == sample;
 }
 
 #endif /* __SUSFS_ARM64_H */

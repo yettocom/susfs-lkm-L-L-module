@@ -345,6 +345,10 @@ static struct susfs_fp_hook reboot_hook = {
  * cannot take at offset 0 on a BTI kernel - see susfs_kp_set_indirect_addr().  An earlier version of this
  * comment claimed such kernels "take neither and the layer fails"; they did not, and the breakpoint
  * that was armed instead killed the device on its first reboot(2).  The refusal is real now. */
+/* Tier 2 is a load-time fact, so say it once: a line per command would push the 256-line
+ * module ring over itself and bury the load-time diagnostics that matter. */
+static bool sc_no_resume_logged;
+
 static int reboot_pre(struct kprobe *kp, struct pt_regs *regs)
 {
 	struct pt_regs *real_regs = (struct pt_regs *)regs->regs[0];
@@ -401,17 +405,30 @@ static int reboot_pre(struct kprobe *kp, struct pt_regs *regs)
 		return 0;
 	}
 
-	/* Upstream's reboot.c patch makes a handled supercall return 0 instead of falling
-	 * through to the real reboot path:
-	 *     if (ret) goto orig_flow;
-	 *     return ret;
-	 * We cannot patch reboot.c, so mirror it from the kprobe: skip the rest of
-	 * __arm64_sys_reboot and return 0 - with these magic values reboot would otherwise
-	 * return -EINVAL, and the prebuilt ksu_susfs tool checks the syscall result.  The
-	 * command itself still runs from task_work before we return to userspace. */
-	susfs_kp_skip_syscall(regs);
-	regs->regs[0] = 0;
-	return 1;
+	/* Two ways out, both leaving the caller with an answer, and neither deriving a return
+	 * address from x30:
+	 *
+	 * 1. A resume point inside invoke_syscall() was measured at load time.  Skip the rest of
+	 *    __arm64_sys_reboot and report 0 - byte for byte what the upstream reboot.c patch
+	 *    does, which is what every existing client expects from a handled supercall.
+	 *
+	 * 2. No resume point.  Do not skip: reboot(2) rejects these magic values itself and
+	 *    returns -EINVAL, while the command still runs from task_work and writes its result
+	 *    into payload.err.  A client that reads the payload (ksud: abi::call() at every site
+	 *    except the kstat add) sees success; one that reads the syscall return sees -EINVAL.
+	 *    This is how a handler that is only an observer behaves, and it keeps the module
+	 *    usable by any manager: no kernel patch line, no ksud change. */
+	if (susfs_kp_skip_syscall(regs)) {
+		regs->regs[0] = 0;
+		return 1;
+	}
+
+	if (!sc_no_resume_logged) {
+		sc_no_resume_logged = true;
+		SUSFS_LOGI("susfs supercall: no resume point - reboot(2) answers -EINVAL, "
+			   "the payload still carries the result\n");
+	}
+	return 0;
 }
 
 /* No .symbol_name: susfs_kp_set_indirect_addr() resolves and adjusts the address, and
@@ -491,6 +508,14 @@ int susfs_supercall_init(void)
 	 * indirect-call target, so susfs_kp_set_indirect_addr() picks the word, and a failure there means
 	 * no probe at all rather than one on the landing pad.  See its comment. */
 	pr_warn("susfs supercall: sys_call_table reboot hook failed %d, trying kprobe fallback\n", rc);
+
+	/* Armed either way.  With a resume point the handler reports 0 exactly like the upstream
+	 * reboot.c patch; without one it stays an observer, reboot(2) answers -EINVAL and
+	 * payload.err carries the real result (see the two-tier comment in reboot_pre()).  Neither
+	 * arm is fatal any more, because neither path derives a return address from x30. */
+	if (!susfs_skip_resume_pc)
+		SUSFS_LOGW("susfs supercall: no resume point inside invoke_syscall - reboot(2) "
+			   "will answer -EINVAL and the payload will carry the result\n");
 	rc = susfs_kp_set_indirect_addr(&reboot_kp, "__arm64_sys_reboot");
 	if (rc)
 		return rc;

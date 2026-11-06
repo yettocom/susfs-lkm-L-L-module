@@ -268,8 +268,9 @@ static int sus_map_skip_vma_pre(struct kprobe *kp, struct pt_regs *regs)
 
 	if (!sus_map_hide_vma(vma, kp->symbol_name))
 		return 0;
+	if (!susfs_kp_skip_call(regs))
+		return 0;
 	regs_set_return_value(regs, 0);
-	susfs_kp_skip_call(regs);
 	return 1;
 }
 
@@ -473,8 +474,9 @@ static bool sus_map_walk_answer(struct kprobe *kp, struct pt_regs *regs,
     /* Both primitives return int 0 for "walked, nothing wrong" and both callers expect
      * that from a skipped walk (upstream's own skip leaves the same value).  Leaving
      * x0 = mm would turn pagemap_read()'s `ret` into a kernel pointer handed to read(2). */
+    if (!susfs_kp_skip_call(regs))
+        return 0;
     regs_set_return_value(regs, 0);
-    susfs_kp_skip_call(regs);
     return true;
 }
 
@@ -664,8 +666,9 @@ static int sus_map_vm_access_pre(struct kprobe *kp, struct pt_regs *regs)
         return 0;
 
     atomic_inc(&n_vm_hides);
+    if (!susfs_kp_skip_call(regs))      /* skip the call: nothing is pinned */
+        return 0;
     regs_set_return_value(regs, 0);     /* "nothing transferred" */
-    susfs_kp_skip_call(regs);          /* skip the call: nothing is pinned */
     return 1;
 }
 

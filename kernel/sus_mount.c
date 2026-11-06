@@ -1252,7 +1252,8 @@ static int sus_mount_show_pre(struct kprobe *kp, struct pt_regs *regs)
         return 0;
     sus_mount_note_id(r);
     atomic_inc(&n_ident_hits);
-    susfs_kp_skip_call(regs);   /* skip this mount line */
+    if (!susfs_kp_skip_call(regs))   /* skip this mount line */
+        return 0;
     /* These show_* callbacks return int and x0 still holds seq_file*.
      * seq_read() treats a negative return as a hard error, so a stray high
      * bit here would break the whole read; upstream's equivalent site

@@ -855,8 +855,11 @@ static int susfs_lsm_kprobe_pre(struct kprobe *p, struct pt_regs *regs)
     if (!ret)
         return 0;
 
+    /* Skip first: when no address can be vouched for the probe must not take the call
+     * away, and x0 has to stay untouched for the real handler. */
+    if (!susfs_kp_skip_call(regs))      /* return to the caller at once */
+        return 0;
     regs->regs[0] = (unsigned long)ret;              /* arm64 return value is x0 */
-    susfs_kp_skip_call(regs);   /* return to the caller at once */
     return 1;
 }
 

@@ -575,6 +575,11 @@ static int susfs_load_layer(int id, bool fatal)
  * susfs_kp_skip_syscall() in susfs_kprobe.h. */
 unsigned long susfs_skip_resume_pc;
 
+/* Whether this core signs and authenticates a pointer with the two .inst words in
+ * susfs_arm64.h.  Set once from susfs_arm64_pac_selftest() before any layer arms and read
+ * by every skip handler. */
+bool susfs_pac_strip_ok;
+
 /*
  * invoke_syscall() reaches every __arm64_sys_* wrapper through one `blr x20`.  The word after it
  * is where the caller continues once the syscall returns, and unlike x30 it carries no
@@ -592,8 +597,7 @@ static void susfs_skip_resolve(void)
     int i;
 
     if (!addr) {
-        pr_warn("susfs skip: invoke_syscall not found - a skipped call falls back to "
-                "stripping x30\n");
+        pr_warn("susfs skip: invoke_syscall not found - no syscall can be skipped\n");
         return;
     }
     for (i = 0; i < 0x100; i++) {
@@ -606,18 +610,22 @@ static void susfs_skip_resolve(void)
             continue;
         if (hit) {
             pr_warn("susfs skip: invoke_syscall has more than one indirect call - "
-                    "a skipped call falls back to stripping x30\n");
+                    "no syscall can be skipped\n");
             return;
         }
         hit = addr + (unsigned long)i * 4 + 4;
     }
     if (!hit) {
-        pr_warn("susfs skip: invoke_syscall has no indirect call - a skipped call "
-                "falls back to stripping x30\n");
+        pr_warn("susfs skip: invoke_syscall has no indirect call - no syscall can be "
+                "skipped\n");
         return;
     }
     susfs_skip_resume_pc = hit;
-    SUSFS_LOGI("skip resume point %px (invoke_syscall+0x%lx)\n", (void *)hit, hit - addr);
+    /* pr_info, not SUSFS_LOGI: this line decides whether a supercall can be delivered at
+     * all, so it must not depend on the logging switch.  Its absence from the field report
+     * is what made that crash hard to read. */
+    pr_info("susfs skip: resume point %px (invoke_syscall+0x%lx)\n",
+            (void *)hit, hit - addr);
 }
 
 static int __init susfs_init(void)
@@ -634,9 +642,18 @@ static int __init susfs_init(void)
     SUSFS_LOGI("init v%s\n", SUSFS_LKM_VERSION);
     ksu_init_symbol_resolver();
 
-    /* Now that kallsyms answers, find where a skipped syscall has to resume.  Not fatal:
-     * the handlers have a fallback that needs no symbol at all. */
+    /* Now that kallsyms answers, find where a skipped syscall has to resume.  Not fatal by
+     * itself: the supercall layer refuses to arm when this comes back empty, because the
+     * register fallback is exactly what cannot work once an entry has signed x30. */
     susfs_skip_resolve();
+
+    /* Pin the two PAC encodings against the core that will run them.  Also not fatal: with
+     * the strip out of service no handler takes a call away, which costs the features that
+     * hide output but cannot jump anywhere unintended. */
+    susfs_pac_strip_ok = susfs_arm64_pac_selftest();
+    pr_info("susfs skip: pac round trip %s\n",
+            susfs_pac_strip_ok ? "ok - a skip may authenticate x30"
+                               : "failed - no call will be skipped");
 
     /* Now that kallsyms lookups work, check the addresses themselves: see imports_guard.c. */
     if (susfs_imports_crosscheck())

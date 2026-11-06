@@ -606,14 +606,16 @@ static int hide_syms_s_show_pre(struct kprobe *kp, struct pt_regs *regs)
 	 * module symbols carry their own spelling (e.g. __kstrtab_foo) with the module's name in module_name. */
 	if (name_should_hide(iter->name)) {
 		atomic_inc(&hide_hit_count);
+		if (!susfs_kp_skip_call(regs))  /* skip the line */
+			return 0;
 		regs->regs[0] = 0;              /* s_show returns 0 */
-		susfs_kp_skip_call(regs);      /* skip the line */
 		return 1;
 	}
 	if (iter->module_name[0] && hide_module_name_match(iter->module_name)) {
 		atomic_inc(&n_kallsyms_mod_skipped);
+		if (!susfs_kp_skip_call(regs))
+			return 0;
 		regs->regs[0] = 0;
-		susfs_kp_skip_call(regs);
 		return 1;
 	}
 	return 0;
@@ -661,8 +663,9 @@ static int hide_syms_m_show_pre(struct kprobe *kp, struct pt_regs *regs)
 		return 0;
 
 	atomic_inc(&n_modlines_skipped);
+	if (!susfs_kp_skip_call(regs))
+		return 0;
 	regs_set_return_value(regs, 0);		/* no output for this entry */
-	susfs_kp_skip_call(regs);
 	return 1;
 }
 
