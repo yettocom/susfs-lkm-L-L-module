@@ -597,7 +597,7 @@ static void susfs_skip_resolve(void)
     int i;
 
     if (!addr) {
-        pr_warn("susfs skip: invoke_syscall not found - no syscall can be skipped\n");
+        SUSFS_LOGW("susfs skip: invoke_syscall not found - no syscall can be skipped\n");
         return;
     }
     for (i = 0; i < 0x100; i++) {
@@ -609,22 +609,22 @@ static void susfs_skip_resolve(void)
         if (insn != SUSFS_ARM64_BLR_X20)
             continue;
         if (hit) {
-            pr_warn("susfs skip: invoke_syscall has more than one indirect call - "
+            SUSFS_LOGW("susfs skip: invoke_syscall has more than one indirect call - "
                     "no syscall can be skipped\n");
             return;
         }
         hit = addr + (unsigned long)i * 4 + 4;
     }
     if (!hit) {
-        pr_warn("susfs skip: invoke_syscall has no indirect call - no syscall can be "
+        SUSFS_LOGW("susfs skip: invoke_syscall has no indirect call - no syscall can be "
                 "skipped\n");
         return;
     }
     susfs_skip_resume_pc = hit;
-    /* pr_info, not SUSFS_LOGI: this line decides whether a supercall can be delivered at
-     * all, so it must not depend on the logging switch.  Its absence from the field report
-     * is what made that crash hard to read. */
-    pr_info("susfs skip: resume point %px (invoke_syscall+0x%lx)\n",
+    /* SUSFS_LOGN, not SUSFS_LOGI: this line decides whether a supercall can be delivered at
+     * all, so it must not depend on the logging switch - and it has to reach the module's own
+     * ring, because its absence from a field report is what made that crash hard to read. */
+    SUSFS_LOGN("susfs skip: resume point %px (invoke_syscall+0x%lx)\n",
             (void *)hit, hit - addr);
 }
 
@@ -651,7 +651,7 @@ static int __init susfs_init(void)
      * the strip out of service no handler takes a call away, which costs the features that
      * hide output but cannot jump anywhere unintended. */
     susfs_pac_strip_ok = susfs_arm64_pac_selftest();
-    pr_info("susfs skip: pac round trip %s\n",
+    SUSFS_LOGN("susfs skip: pac round trip %s\n",
             susfs_pac_strip_ok ? "ok - a skip may authenticate x30"
                                : "failed - no call will be skipped");
 

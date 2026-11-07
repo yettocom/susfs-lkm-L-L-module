@@ -433,9 +433,30 @@ static atomic_t sus_path_pend_logged_rc = ATOMIC_INIT(1);   /* rc already report
  * own answer asked directly (susfs_is_current_proc_umounted_app(), ksu_umount_gate.h).  Hiding from
  * every `uid >= 10000` - manager and su-granted apps included - was issue #34.
  * hide_from_apps=0 applies the hidden set to every process including root - handy when testing from
- * an adb shell. */
+ * an adb shell.  Whether it reaches a given caller is answered by the carrier counters in
+ * /proc/susfs_path: with getattr==0 the carrier never ran and the switch cannot have any
+ * effect, whatever its value says. */
 static int hide_from_apps = 1;
 module_param(hide_from_apps, int, 0644);
+
+/* Why a rule that is in the table can still hide nothing.  From the outside the three
+ * causes are indistinguishable, so each one gets a counter:
+ *   getattr         - the carrier ran at all.  A kprobe on security_inode_getattr that
+ *                     never fires (FULL LTO can inline the dispatcher into its only
+ *                     caller and leave the out-of-line copy dead) looks exactly like a
+ *                     policy that always answers "not hidden".  Zero here means the
+ *                     layer is armed and unreachable, not that the rules are wrong.
+ *   resolver-skip   - our own kern_path() walk was the caller, so the table refused to
+ *                     answer itself (sus_path_inode_hidden()).
+ *   identity-match  - a rule's identity matched the inode being accessed.
+ *   gate-refused    - an identity matched and the identity gate still said no.
+ * Read together: getattr==0 is the carrier; getattr>0 with identity-match==0 is an
+ * identity miss (the rule holds a different object than readers get); identity-match>0
+ * with gate-refused>0 is the gate.  Atomics because they sit on the stat hot path. */
+static atomic_t n_kp_getattr = ATOMIC_INIT(0);
+static atomic_t n_resolver_skip = ATOMIC_INIT(0);
+static atomic_t n_identity_match = ATOMIC_INIT(0);
+static atomic_t n_gate_false = ATOMIC_INIT(0);
 
 /* One identity gate for every layer.  `inode` is the object whose ownership the
  * rule is asking about; NULL means a pending rule has no inode yet and only the
@@ -463,6 +484,20 @@ static inline bool sus_path_entry_gate(const struct sus_path_entry *e,
     if (!inode)
         inode = e->inode;
     return sus_path_gate(inode);
+}
+
+/* The only difference from sus_path_entry_gate() is that it records the answer: an
+ * identity matched, and the gate either let the rule hide the object or refused.  Used
+ * only where a rule has already matched, so the counters mean what their names say. */
+static inline bool sus_path_entry_gate_counted(const struct sus_path_entry *e,
+                                               struct inode *inode)
+{
+    bool hide = sus_path_entry_gate(e, inode);
+
+    atomic_inc(&n_identity_match);
+    if (!hide)
+        atomic_inc(&n_gate_false);
+    return hide;
 }
 
 static bool sus_path_is_hidden(u64 ino, const char *name)
@@ -1267,8 +1302,10 @@ static bool sus_path_inode_hidden(struct inode *inode)
 
     /* See sus_path_resolver: the resolving task must not be answered by its own table,
      * or its walk of that very path is refused. */
-    if (sus_path_is_resolver())
+    if (sus_path_is_resolver()) {
+        atomic_inc(&n_resolver_skip);
         return false;
+    }
 
     dev = (u64)inode->i_sb->s_dev;
 
@@ -1276,7 +1313,7 @@ static bool sus_path_inode_hidden(struct inode *inode)
     list_for_each_entry(e, &sus_path_list, list) {
         /* Fast path: the exact object the rule resolved. */
         if (e->inode == inode) {
-            if (sus_path_entry_gate(e, inode)) {
+            if (sus_path_entry_gate_counted(e, inode)) {
                 hidden = true;
                 break;
             }
@@ -1288,7 +1325,7 @@ static bool sus_path_inode_hidden(struct inode *inode)
             continue;
         if (e->dev == dev) {
             by_identity = true;
-            if (sus_path_entry_gate(e, inode)) {
+            if (sus_path_entry_gate_counted(e, inode)) {
                 hidden = true;
                 break;
             }
@@ -1298,7 +1335,7 @@ static bool sus_path_inode_hidden(struct inode *inode)
         if (e->self_protect && e->inode &&
             e->inode->i_sb->s_type == inode->i_sb->s_type) {
             by_identity = true;
-            if (sus_path_entry_gate(e, inode)) {
+            if (sus_path_entry_gate_counted(e, inode)) {
                 hidden = true;
                 break;
             }
@@ -1346,6 +1383,10 @@ bool sus_path_user_rules_present(void)
 static int sus_path_inode_getattr(const struct path *path)
 {
     struct inode *inode;
+
+    /* Reached only when the kprobe on security_inode_getattr fired: this is the
+     * counter that separates "the carrier never ran" from "the policy said no". */
+    atomic_inc(&n_kp_getattr);
 
     if (path && path->dentry) {
         inode = d_inode(path->dentry);
@@ -2363,6 +2404,10 @@ static int sus_path_format_list(char *buf, size_t size)
                    atomic_read(&n_enoent_readlink),
                    atomic_read(&n_enoent_readlink_lsm),
                    atomic_read(&n_iop_arm_fail));
+    n = sus_path_list_puts(buf, n, &trunc,
+                   "carrier: getattr=%d resolver-skip=%d identity-match=%d gate-refused=%d\n",
+                   atomic_read(&n_kp_getattr), atomic_read(&n_resolver_skip),
+                   atomic_read(&n_identity_match), atomic_read(&n_gate_false));
     n = sus_path_list_puts(buf, n, &trunc,
                    "dirent: pending=%d (counters: /proc/susfs_kstat)\n",
                    atomic_read(&sus_path_n_pending));

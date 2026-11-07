@@ -32,6 +32,17 @@ void susfs_log_store(const char *fmt, ...);
 		}								\
 	} while (0)
 
+/* Load-time facts that decide whether a feature can work at all, recorded whether or not
+ * logging is on and at pr_info level because nothing failed: the resume point and the PAC
+ * round trip are what say whether a skipped syscall can be delivered.  Without this they
+ * were pr_info only, so they vanished with the first dmesg wrap - which is why one report
+ * could not tell a working skip from a missing one. */
+#define SUSFS_LOGN(fmt, ...)						\
+	do {								\
+		susfs_log_store(fmt, ##__VA_ARGS__);			\
+		pr_info(fmt, ##__VA_ARGS__);				\
+	} while (0)
+
 /* Warnings and errors reach the ring whether or not logging is on, matching pr_warn/pr_err being
  * unconditional: a load that failed has to stay explainable after dmesg has moved on. */
 #define SUSFS_LOGW(fmt, ...)						\
