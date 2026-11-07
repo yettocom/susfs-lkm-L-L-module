@@ -40,6 +40,12 @@ struct ksu_lsm_hook {
      * object carries the probe and its decision function.  See lsm_hook.c. */
     struct kprobe kp;
     susfs_lsm_kprobe_fn kprobe_fn;
+    /* The symbol the probe is actually placed on.  NULL means the hook's own
+     * `security_<member>()` dispatcher; a name means the VFS function that calls it.
+     * CONFIG_LTO_CLANG_FULL inlines the small dispatchers into their callers and leaves
+     * the out-of-line copy unreferenced, so a probe on the dispatcher arms and never
+     * fires - see the note above lsm_kprobe_install_one() in lsm_hook.c. */
+    const char *probe_name;
 #endif
     /* true = INSERT our own hook instead of overwriting the slot of an entry resolved by
      * symbol name (see lsm_hook.c).  Nothing is resolved by name, so target_name stays
@@ -100,6 +106,20 @@ struct ksu_lsm_hook {
         .hook_offset = offsetof(struct security_hook_list, hook.member),                      \
         .replacement = (void *)(replacement_fn), .insert = true,                              \
         .kprobe_fn = (kfn),                                                                   \
+    }
+
+
+/* Same as KSU_LSM_HOOK_INSERT_KPROBE, but the probe sits on `probe` instead of on the
+ * dispatcher named by `member`.  The decision function still has to match the LSM hook
+ * type, and it reads its arguments from the registers of the *probed* function - the two
+ * agree only where the caller passes the same value in the same register, so every site
+ * has to be checked by hand. */
+#define KSU_LSM_HOOK_INSERT_KPROBE_AT(member, probe, replacement_fn, kfn)                    \
+    {                                                                                        \
+        .head_name = #member, .head_offset = offsetof(KSU_LSM_HOOK_HEADS_TYPE, member),       \
+        .hook_offset = offsetof(struct security_hook_list, hook.member),                      \
+        .replacement = (void *)(replacement_fn), .insert = true,                              \
+        .kprobe_fn = (kfn), .probe_name = (probe),                                            \
     }
 #endif
 

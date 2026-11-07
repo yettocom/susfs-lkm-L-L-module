@@ -876,7 +876,10 @@ static int lsm_kprobe_install_one(struct ksu_lsm_hook *hook)
      * symbol - check it rather than let a short buffer pick the target.  (Every caller passes a
      * literal member name, so this cannot fire today; it is the cheap guard CERT ERR33-C asks
      * for around a formatting call whose result is then used as a name.) */
-    n = snprintf(sym, sizeof(sym), "security_%s", hook->head_name);
+    if (hook->probe_name)
+        n = snprintf(sym, sizeof(sym), "%s", hook->probe_name);
+    else
+        n = snprintf(sym, sizeof(sym), "security_%s", hook->head_name);
     if (n <= 0 || (size_t)n >= sizeof(sym)) {
         pr_err("lsm_hook: %s: dispatcher name does not fit (%d)\n", hook->head_name, n);
         return -EINVAL;
@@ -890,7 +893,13 @@ static int lsm_kprobe_install_one(struct ksu_lsm_hook *hook)
      * "return at once with this answer" trick would skip part of a body).  A missing exact symbol
      * is therefore reported instead of being answered with the wrong address.  Verified: all 13
      * dispatchers are `T` in the reference System.map of android13-5.15, android14-6.1 and
-     * android15-6.6. */
+     * android15-6.6.
+     *
+     * Being `T` is not the same as being reachable.  With CONFIG_LTO_CLANG_FULL the small
+     * dispatchers are inlined into every caller and the out-of-line copy survives only
+     * because it has external linkage, so a probe on it arms successfully and never fires
+     * (measured on a 5.15 Samsung image: 11 of 14 dispatchers have no caller left at all).
+     * A hook that has to fire therefore names its caller through probe_name. */
     addr = find_kernel_symbol_exact(sym);
     if (!addr) {
         pr_err("lsm_hook: %s: no exact %s in this kernel's kallsyms\n", hook->head_name, sym);

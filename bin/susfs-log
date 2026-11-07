@@ -41,6 +41,12 @@ fi
 	echo "== /proc/susfs_status"
 	cat /proc/susfs_status 2>/dev/null || echo "(missing - the module is not loaded, or the node is hidden)"
 	echo
+	echo "== /proc/susfs_path (carrier: getattr=0 means the probe never fired)"
+	cat /proc/susfs_path 2>/dev/null || echo "(missing - the module is not loaded, or the node is hidden)"
+	echo
+	echo "== /proc/susfs_kstat"
+	cat /proc/susfs_kstat 2>/dev/null || echo "(missing)"
+	echo
 	echo "== /proc/susfs_log (this module's ring, this boot)"
 	cat /proc/susfs_log 2>/dev/null || echo "(missing - needs a build with the ring, or the module is not loaded)"
 	echo

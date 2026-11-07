@@ -860,10 +860,19 @@ static int sus_path_lsm_readlink(struct dentry *dentry);
         (void)hook;                                                                     \
         return fn(__VA_ARGS__);                                                         \
     }
+/* Probe the caller instead of the dispatcher, for the members where FULL LTO has inlined
+ * the dispatcher away.  The decision function is unchanged; only the registers it reads
+ * are, and those are written at the SUS_PATH_KPROBE site. */
+#define SUS_PATH_LSM_INSERT_AT(member, probe, replacement_fn, name)                      \
+    KSU_LSM_HOOK_INSERT_KPROBE_AT(member, probe, replacement_fn, sus_path_kp_##name)
 #define SUS_PATH_LSM_INSERT(member, replacement_fn, name)                               \
     KSU_LSM_HOOK_INSERT_KPROBE(member, replacement_fn, sus_path_kp_##name)
 #else
 #define SUS_PATH_LSM_INSERT(member, replacement_fn, name)                               \
+    KSU_LSM_HOOK_INSERT(member, replacement_fn)
+/* Nothing is probed on this build - the hook list itself is patched - so the caller is
+ * irrelevant and the extra argument is ignored. */
+#define SUS_PATH_LSM_INSERT_AT(member, probe, replacement_fn, name)                     \
     KSU_LSM_HOOK_INSERT(member, replacement_fn)
 #endif
 
@@ -1243,7 +1252,7 @@ SUS_PATH_KPROBE(inode_readlink, sus_path_lsm_readlink,
 #endif
 
 static struct ksu_lsm_hook sus_path_getattr_hook =
-	SUS_PATH_LSM_INSERT(inode_getattr, sus_path_inode_getattr, inode_getattr);
+	SUS_PATH_LSM_INSERT_AT(inode_getattr, "vfs_getattr", sus_path_inode_getattr, inode_getattr);
 
 static struct ksu_lsm_hook sus_path_perm_hook =
 	SUS_PATH_LSM_INSERT(inode_permission, sus_path_inode_permission, inode_permission);
@@ -1398,9 +1407,12 @@ static int sus_path_inode_getattr(const struct path *path)
 {
     struct inode *inode;
 
-    /* Reached only when the kprobe on security_inode_getattr fired: this is the
-     * counter that separates "the carrier never ran" from "the policy said no". */
-    atomic_inc(&sus_path_carrier.kp_getattr);
+    /* Reached only when the kprobe on vfs_getattr fired: this is the counter that
+     * separates "the carrier never ran" from "the policy said no".  The first hit is also
+     * written to the module ring, so one stat answers the question without reading the
+     * counters at all. */
+    if (atomic_inc_return(&sus_path_carrier.kp_getattr) == 1)
+        SUSFS_LOGI("sus_path: carrier is live - first getattr through vfs_getattr\n");
 
     if (path && path->dentry) {
         inode = d_inode(path->dentry);
