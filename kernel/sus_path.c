@@ -25,6 +25,7 @@
  * equivalent here on purpose - see the note above sus_path_inode_hidden().
  */
 #include <linux/module.h>
+#include <linux/cache.h>	/* ____cacheline_aligned */
 #include <linux/delay.h>	/* ndelay, for the timing cover */
 #include <linux/random.h>	/* prandom_u32_max, for its jitter */
 #include <linux/tracepoint.h>
@@ -448,15 +449,28 @@ module_param(hide_from_apps, int, 0644);
  *                     layer is armed and unreachable, not that the rules are wrong.
  *   resolver-skip   - our own kern_path() walk was the caller, so the table refused to
  *                     answer itself (sus_path_inode_hidden()).
- *   identity-match  - a rule's identity matched the inode being accessed.
+ *   gate-evals      - a rule's identity matched and the gate was asked.  One per matched
+ *                     call site, so a single stat of a directory with many rules raises
+ *                     this once per rule; it counts evaluations, not objects.
  *   gate-refused    - an identity matched and the identity gate still said no.
- * Read together: getattr==0 is the carrier; getattr>0 with identity-match==0 is an
- * identity miss (the rule holds a different object than readers get); identity-match>0
- * with gate-refused>0 is the gate.  Atomics because they sit on the stat hot path. */
-static atomic_t n_kp_getattr = ATOMIC_INIT(0);
-static atomic_t n_resolver_skip = ATOMIC_INIT(0);
-static atomic_t n_identity_match = ATOMIC_INIT(0);
-static atomic_t n_gate_false = ATOMIC_INIT(0);
+ * Read together: getattr==0 is the carrier; getattr>0 with gate-evals==0 is an
+ * identity miss (the rule holds a different object than readers get); gate-evals>0
+ * with gate-refused>0 is the gate.  Atomics because they sit on the stat hot path.
+ *
+ * The four live in one struct that starts on a cache line boundary of its own.  They are
+ * written on every stat and every namei lookup, so sharing a line with the read-mostly
+ * tables above would make every other CPU's lookup pay for the invalidation.  Four locked
+ * increments on one line from one CPU are cheap; the line bouncing is what is not.
+ * A struct rather than four separate variables: separate ones get reordered by LTO and
+ * land wherever the linker likes, which is what the first attempt at this did. */
+struct sus_path_carrier {
+	atomic_t kp_getattr;
+	atomic_t resolver_skip;
+	atomic_t gate_evals;
+	atomic_t gate_false;
+};
+
+static struct sus_path_carrier sus_path_carrier ____cacheline_aligned;
 
 /* One identity gate for every layer.  `inode` is the object whose ownership the
  * rule is asking about; NULL means a pending rule has no inode yet and only the
@@ -494,9 +508,9 @@ static inline bool sus_path_entry_gate_counted(const struct sus_path_entry *e,
 {
     bool hide = sus_path_entry_gate(e, inode);
 
-    atomic_inc(&n_identity_match);
+    atomic_inc(&sus_path_carrier.gate_evals);
     if (!hide)
-        atomic_inc(&n_gate_false);
+        atomic_inc(&sus_path_carrier.gate_false);
     return hide;
 }
 
@@ -1303,7 +1317,7 @@ static bool sus_path_inode_hidden(struct inode *inode)
     /* See sus_path_resolver: the resolving task must not be answered by its own table,
      * or its walk of that very path is refused. */
     if (sus_path_is_resolver()) {
-        atomic_inc(&n_resolver_skip);
+        atomic_inc(&sus_path_carrier.resolver_skip);
         return false;
     }
 
@@ -1386,7 +1400,7 @@ static int sus_path_inode_getattr(const struct path *path)
 
     /* Reached only when the kprobe on security_inode_getattr fired: this is the
      * counter that separates "the carrier never ran" from "the policy said no". */
-    atomic_inc(&n_kp_getattr);
+    atomic_inc(&sus_path_carrier.kp_getattr);
 
     if (path && path->dentry) {
         inode = d_inode(path->dentry);
@@ -2405,9 +2419,9 @@ static int sus_path_format_list(char *buf, size_t size)
                    atomic_read(&n_enoent_readlink_lsm),
                    atomic_read(&n_iop_arm_fail));
     n = sus_path_list_puts(buf, n, &trunc,
-                   "carrier: getattr=%d resolver-skip=%d identity-match=%d gate-refused=%d\n",
-                   atomic_read(&n_kp_getattr), atomic_read(&n_resolver_skip),
-                   atomic_read(&n_identity_match), atomic_read(&n_gate_false));
+                   "carrier: getattr=%d resolver-skip=%d gate-evals=%d gate-refused=%d\n",
+                   atomic_read(&sus_path_carrier.kp_getattr), atomic_read(&sus_path_carrier.resolver_skip),
+                   atomic_read(&sus_path_carrier.gate_evals), atomic_read(&sus_path_carrier.gate_false));
     n = sus_path_list_puts(buf, n, &trunc,
                    "dirent: pending=%d (counters: /proc/susfs_kstat)\n",
                    atomic_read(&sus_path_n_pending));
