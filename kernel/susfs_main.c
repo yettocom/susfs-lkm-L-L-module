@@ -393,6 +393,79 @@ int susfs_denied_last_err(void)
     return READ_ONCE(susfs_denied_err);
 }
 
+/* ---- RKP protection query ------------------------------------------------------------
+ *
+ * Three walls on this device, and they are the same question asked of three addresses: is
+ * the page this symbol lives on writable from EL1?
+ *
+ *   sys_call_table           .rodata  - the pointer write ksu_patch_text() would do
+ *   security_hook_heads      .rodata  - the write upstream's whole LSM carrier is built on
+ *   aarch64_insn_patch_text  .text    - the write the branch patch does, and that works
+ *
+ * RKP keeps the answer in EL2 and exposes queries only, never a "make it writable": there
+ * is no command in its table for that.  is_rkp_ro_buffer() and is_kdp_protect_addr() are
+ * two of the queries.  Their prototypes are not guessed - both were read out of this
+ * kernel's own BTF (FUNC entries, linkage 0):
+ *
+ *   bool is_rkp_ro_buffer(u64 addr)
+ *   int  is_kdp_protect_addr(unsigned long addr)
+ *
+ * Both take one argument and have no side effect, so asking is safe on a kernel that turns
+ * out not to carry them: an unresolved symbol leaves the pointer NULL and the line says so.
+ * Nothing here writes, and nothing here is on a hot path - it runs when the node is read.
+ */
+static bool (*susfs_rkp_ro_buffer_fn)(u64 addr);
+static int (*susfs_rkp_kdp_protect_fn)(unsigned long addr);
+
+static const char *const susfs_rkp_probe_name[] = {
+    "sys_call_table",
+    "security_hook_heads",
+    "aarch64_insn_patch_text",
+};
+static unsigned long susfs_rkp_probe_addr[ARRAY_SIZE(susfs_rkp_probe_name)];
+
+static void susfs_rkp_query_init(void)
+{
+    int i;
+
+    susfs_rkp_ro_buffer_fn = (bool (*)(u64))find_kernel_symbol_exact("is_rkp_ro_buffer");
+    susfs_rkp_kdp_protect_fn = (int (*)(unsigned long))find_kernel_symbol_exact("is_kdp_protect_addr");
+    for (i = 0; i < (int)ARRAY_SIZE(susfs_rkp_probe_name); i++)
+        susfs_rkp_probe_addr[i] = find_kernel_symbol_exact(susfs_rkp_probe_name[i]);
+
+    if (!susfs_rkp_ro_buffer_fn && !susfs_rkp_kdp_protect_fn) {
+        SUSFS_LOGI("rkp query: this kernel exposes neither is_rkp_ro_buffer nor is_kdp_protect_addr\n");
+        return;
+    }
+    SUSFS_LOGI("rkp query: ro_buffer=%s kdp_protect=%s\n",
+               susfs_rkp_ro_buffer_fn ? "yes" : "no",
+               susfs_rkp_kdp_protect_fn ? "yes" : "no");
+}
+
+/* -1 means "that query is not available on this kernel", which is different from 0. */
+static void susfs_rkp_query_show(struct seq_file *m)
+{
+    int i;
+
+    if (!susfs_rkp_ro_buffer_fn && !susfs_rkp_kdp_protect_fn) {
+        seq_puts(m, "rkp_query=none\n");
+        return;
+    }
+    seq_printf(m, "rkp_query=%s%s%s\n",
+               susfs_rkp_ro_buffer_fn ? "is_rkp_ro_buffer" : "",
+               (susfs_rkp_ro_buffer_fn && susfs_rkp_kdp_protect_fn) ? "+" : "",
+               susfs_rkp_kdp_protect_fn ? "is_kdp_protect_addr" : "");
+    for (i = 0; i < (int)ARRAY_SIZE(susfs_rkp_probe_name); i++) {
+        unsigned long a = susfs_rkp_probe_addr[i];
+
+        if (!a)
+            continue;
+        seq_printf(m, "rkp_%s=%px ro=%d kdp=%d\n", susfs_rkp_probe_name[i], (void *)a,
+                   susfs_rkp_ro_buffer_fn ? (int)susfs_rkp_ro_buffer_fn(a) : -1,
+                   susfs_rkp_kdp_protect_fn ? susfs_rkp_kdp_protect_fn(a) : -1);
+    }
+}
+
 static int susfs_status_proc_show(struct seq_file *m, void *v)
 {
     int i, up = 0;
@@ -421,6 +494,7 @@ static int susfs_status_proc_show(struct seq_file *m, void *v)
     seq_printf(m, "denied=%u last_denied=%s:%d\n", susfs_denied_count(),
            susfs_denied_last() ?: "none", susfs_denied_last_err());
     seq_printf(m, "owner=%s\n", susfs_owner_nonce[0] ? susfs_owner_nonce : "none");
+    susfs_rkp_query_show(m);
     for (i = 0; i < (int)ARRAY_SIZE(susfs_layers); i++)
         seq_printf(m, "layer %s %s\n", susfs_layers[i].name, susfs_layers[i].up ? "up" : "down");
     return 0;
@@ -654,6 +728,9 @@ static int __init susfs_init(void)
     SUSFS_LOGN("susfs skip: pac round trip %s\n",
             susfs_pac_strip_ok ? "ok - a skip may authenticate x30"
                                : "failed - no call will be skipped");
+
+    /* Ask RKP what it protects, so the three walls are visible without a crash. */
+    susfs_rkp_query_init();
 
     /* Now that kallsyms lookups work, check the addresses themselves: see imports_guard.c. */
     if (susfs_imports_crosscheck())
