@@ -714,7 +714,11 @@ static int __init susfs_init(void)
         return -EINVAL;
 
     SUSFS_LOGI("init v%s\n", SUSFS_LKM_VERSION);
-    ksu_init_symbol_resolver();
+    /* Since upstream 87e738c4 this returns int and a failure is fatal: every layer
+     * below resolves its symbols through it, so a module that loaded without it
+     * would accept rules that nothing can apply. */
+    if (ksu_init_symbol_resolver())
+        return -ENODATA;
 
     /* Now that kallsyms answers, find where a skipped syscall has to resume.  Not fatal by
      * itself: the supercall layer refuses to arm when this comes back empty, because the
