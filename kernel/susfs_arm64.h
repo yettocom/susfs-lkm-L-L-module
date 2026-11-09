@@ -181,4 +181,11 @@ static __always_inline bool susfs_arm64_pac_selftest(void)
 			susfs_arm64_pac_sign_key_b(sample, sample), sample) == sample;
 }
 
+/*
+ * Whether this kernel was built with BTI.  It is a property of the build, not of the CPU,
+ * and the build leaves a trace in .text - see the definition in susfs_rkp.c for the
+ * measurement it rests on.  Answers "yes" when the text bounds cannot be resolved.
+ */
+bool susfs_arm64_kernel_has_bti(void);
+
 #endif /* __SUSFS_ARM64_H */

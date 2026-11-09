@@ -28,6 +28,7 @@
 #include <linux/set_memory.h>
 #include <linux/sizes.h>
 #include <linux/types.h>
+#include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/vmalloc.h>
 
@@ -35,6 +36,83 @@
 #include "susfs_rkp.h"
 #include "susfs_arm64.h"
 #include "susfs_log.h"
+
+/*
+ * Is this kernel built with BTI?
+ *
+ * The answer decides whether a kretprobe may sit at +0 of a function whose entry signs the
+ * link register.  It is a property of the *build*, not of the CPU: a core that implements BTI
+ * runs a kernel compiled without it exactly as before, so neither /proc/cpuinfo nor the CPU
+ * feature bits answer this question.
+ *
+ * The build leaves a trace.  -mbranch-protection=bti puts a `bti j` at every compiler-generated
+ * jump-table target; a build without it puts none.  Measured over the whole .text of the three
+ * retail Samsung images this module is aimed at:
+ *
+ *   5.15.197 (S9180)   60,084 `bti j`   BTI on
+ *   6.1.162  (S9280)        0           BTI off
+ *   6.6.127  (S9380)       34           BTI off - all 34 are KVM's hand-written hyp vectors
+ *
+ * three orders of magnitude apart, so a window of text separates them without a threshold that
+ * has to be tuned per build.  A BTI build runs about 2.6 hits per KiB, so 500 hits arrive
+ * within 200 KiB; a non-BTI build cannot reach 500 anywhere in the image.  The window is 8 MiB
+ * rather than 1 MiB because one hand-written block must not be able to reach the threshold -
+ * the 34 above sit 540 KiB into .text.
+ *
+ * This lives in a .c file rather than in susfs_arm64.h because the scan needs a buffer: as a
+ * static inline it put 4 KiB on the stack of every caller, and the callers are module-init
+ * functions that already run close to the 2 KiB frame limit (-Wframe-larger-than is fatal on
+ * 6.1 and 6.6).
+ *
+ * Unknown text bounds answer "yes".  Refusing a probe costs a feature; arming one on a BTI
+ * kernel costs the machine.
+ */
+#define SUSFS_BTI_SCAN_BYTES	(8UL << 20)
+#define SUSFS_BTI_SCAN_HITS	500
+
+bool susfs_arm64_kernel_has_bti(void)
+{
+	static int cached = -1;
+	unsigned long st, et, off, end;
+	u32 buf[128];
+	unsigned int seen = 0;
+
+	if (cached >= 0)
+		return cached != 0;
+
+	st = find_kernel_symbol_exact("_stext");
+	if (!st)
+		st = find_kernel_symbol_exact("_text");
+	if (!st) {
+		cached = 1;	/* unknown text bounds keep the conservative answer */
+		return true;
+	}
+	et = find_kernel_symbol_exact("_etext");
+
+	end = st + SUSFS_BTI_SCAN_BYTES;
+	if (et && et > st && et < end)
+		end = et;
+	for (off = st; off + sizeof(buf) <= end; off += sizeof(buf)) {
+		unsigned int i;
+
+		if (copy_from_kernel_nofault(buf, (void *)off, sizeof(buf)))
+			break;
+		for (i = 0; i < ARRAY_SIZE(buf); i++) {
+			if (buf[i] != SUSFS_ARM64_BTI_J && buf[i] != SUSFS_ARM64_BTI_JC)
+				continue;
+			if (++seen < SUSFS_BTI_SCAN_HITS)
+				continue;
+			SUSFS_LOGI("susfs_krp: %u bti j in the first %lu KiB of text - this kernel is "
+				   "built with BTI\n", seen, (off + sizeof(buf) - st) >> 10);
+			cached = 1;
+			return true;
+		}
+	}
+	cached = 0;
+	SUSFS_LOGI("susfs_krp: no bti j in %lu KiB of text - this kernel is not built with BTI\n",
+		   (off - st) >> 10);
+	return false;
+}
 
 #ifdef __aarch64__
 

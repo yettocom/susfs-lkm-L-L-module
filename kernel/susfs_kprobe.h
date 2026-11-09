@@ -235,8 +235,12 @@ static inline bool susfs_kp_skip_syscall(struct pt_regs *regs)
  *    whatever x30 holds by then, which is the trampoline this module does not own.
  *
  * The entry's own word decides, in three states - a guess here is a panic on panic_on_oops=1:
- *  - paciasp/pacibsp in +0: refuse.  Every __arm64_sys_* wrapper on this build's 5.15/6.1/6.6
- *    targets starts that way, so this is the state that keeps five features off;
+ *  - paciasp/pacibsp in +0: only the build decides.  With BTI that word is also the
+ *    landing pad, and taking it away is the branch-type exception above; without BTI it is
+ *    only a signature, and +0 becomes the correct offset - the kretprobe then swaps x30
+ *    before it is signed, so the address it installs is the one that gets signed and the
+ *    one the epilogue authenticates, while the value it saves is still the caller's plain
+ *    return address.  susfs_arm64_kernel_has_bti() answers which build this is;
  *  - a landing pad without a signature: +4 is the plain upstream shape, where x30 still holds the
  *    caller's address.  Arm it.  No shipped target reaches this state today, which is the point:
  *    the rule follows the kernel instead of the kernel list in this file;
@@ -261,10 +265,22 @@ static inline int susfs_kr_set_indirect_addr_at(struct kretprobe *krp, unsigned 
 		return -EFAULT;
 	}
 	if (susfs_arm64_is_pac(insn)) {
-		SUSFS_LOGW("susfs_krp: %s opens with 0x%08x, which signs the link register: at +0 a "
-			   "breakpoint would take the landing pad away, at +4 the kretprobe would return "
-			   "through that signature - not arming one\n", name, insn);
-		return -EOPNOTSUPP;
+		if (susfs_arm64_kernel_has_bti()) {
+			SUSFS_LOGW("susfs_krp: %s opens with 0x%08x, which signs the link register, and "
+				   "this kernel is built with BTI: at +0 a breakpoint would take the landing "
+				   "pad away, at +4 the kretprobe would return through that signature - not "
+				   "arming one\n", name, insn);
+			return -EOPNOTSUPP;
+		}
+		/* No BTI, so nothing needs the word at +0 to stay: it is a signature, not a landing
+		 * pad.  +0 is also the only correct offset here - the kretprobe swaps x30 before
+		 * paciasp runs, so the address it installs is the one that gets signed and the one
+		 * the epilogue authenticates, while the value it saves is still the caller's plain
+		 * return address. */
+		krp->kp.addr = (kprobe_opcode_t *)fn;
+		SUSFS_LOGI("susfs_krp: %s+0x0 (no BTI: the entry is a signature, not a pad)\n",
+			   name);
+		return 0;
 	}
 	if (!susfs_arm64_insn_is_pad(insn)) {
 		SUSFS_LOGW("susfs_krp: %s opens with 0x%08x, which this build cannot place: arming at "
