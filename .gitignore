@@ -28,8 +28,7 @@ abi_layout_check/
 
 # device test scripts (t_*.sh): they hardcode /data/local/tmp paths and are
 # hardware-specific scaffolding, not part of the module.  Earlier revisions
-# tracked them; this keeps new ones out.  (tools/ is NOT ignored - CI builds
-# tools/susfs_sc.c into the supercall client.)
+# tracked them; this keeps new ones out.  (tools/ is NOT ignored.)
 # t_dev.ps1 is the same thing on the host side: it pushes and runs those scripts
 # (plus t_*.ps1 scratch), and is only useful against a device this machine owns.
 t_*.sh
@@ -47,7 +46,7 @@ art/
 
 # development-only scaffolding: the probe/test modules and C test programs used
 # while working the hooks out.  They are not built by kernel/Makefile and are not
-# part of the module; only tools/susfs_sc.c is, because CI compiles it.
+# part of the module.
 diag_or.sh
 test_*.c
 kernel/*_test.c
@@ -59,8 +58,7 @@ kernel/ih_hook_stub.S
 # namespace-probe helper used by t_clonens.sh
 nsprobe.sh
 
-# byte-compiled python: tools/cfi_sites.py is run by CI and by hand, and CPython leaves
-# __pycache__ next to it
+# byte-compiled python: CPython leaves __pycache__ next to any script it runs
 __pycache__/
 *.pyc
 

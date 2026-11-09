@@ -546,8 +546,8 @@ static void susfs_status_node_down(void)
  * `fail_layer=3` skips the ksu_umount_gate init WITHOUT failing the load (that layer is not fatal),
  * which is safe only because its flag defaults to the pre-#34 answer - see ksu_umount_gate.c.
  *
- * Index map (keep this list and the fail_layer= references in tools/verify-gki.sh and the layer
- * comments in sync whenever a layer is inserted):
+ * Index map (keep this list and the fail_layer= references and the layer comments in sync
+ * whenever a layer is inserted):
  *   1 rkp_branch  2 fp_hook  3 ksu_umount_gate  4 ksu_allow_gate  5 lsm_hook  6 sus_path
  *   7 create_gate  8 opath  9 dirent  10 uname  11 kstat  12 sus_map  13 sus_mount
  *   14 cmdline  15 open_redirect  16 enable_log  17 avc_spoof  18 supercall  19 hide_syms

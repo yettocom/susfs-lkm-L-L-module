@@ -1089,8 +1089,8 @@ static struct ksu_lsm_hook sus_path_link_hook =
  *
  * One trampoline per hook member, because each has to be called through its own prototype
  * (and the two idmap arguments are version-dependent, hence the DECL/ARG macros); the macro
- * only saves repeating the cast and the two attributes.  tools/cfi_sites.py asserts on the
- * built .ko that no other function in this module carries a checked call. */
+ * only saves repeating the cast and the two attributes.  Every one of them is __nocfi noinline,
+ * so no other function in this module carries a checked call. */
 #define SUS_LSM_ORIG_CALL(member, ...)						\
 	static __nocfi noinline int sus_path_orig_##member(			\
 		LSM_HOOK_FN_TYPE(member) fn, __VA_ARGS__)

@@ -1594,7 +1594,7 @@ static __nocfi void susfs_kstat_post(long nr, bool compat, const unsigned long *
  *
  * WHY IT MOVED.  As a tracepoint the callback ran on every syscall exit and paid
  * is_compat_task(), syscall_get_nr() and two classifiers for all of them.  Measured on the device
- * before this change, on the getpid line of susfs_bench (no entry of ours is involved there, so it
+ * before this change, on the getpid line of a no-libc benchmark (no entry of ours is involved there, so it
  * is the cost of whatever fires on every syscall):
  *
  *     kstat layer forced off (fail_layer=10)   126 / 126 / 126 ns   <- no tracepoint

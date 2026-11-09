@@ -105,7 +105,7 @@ int ksu_patch_memory_init(void)
 }
 
 /* Both are indirect calls into the kernel, so each carries the __nocfi noinline the rest of the
- * module uses (tools/cfi_sites.py fails the build otherwise). */
+ * module uses for a runtime-resolved pointer. */
 static __nocfi noinline void ksu_flush_dcache(unsigned long start, size_t sz)
 {
     if (ksu_dcache_new_fn)

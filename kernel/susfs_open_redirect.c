@@ -100,8 +100,8 @@ static void (*or_cred_getsecid)(const struct cred *cred, u32 *secid);
 static int (*or_vfs_statfs_fn)(const struct path *path, struct kstatfs *buf);
 
 /* The one indirect call into the kernel this file still makes, in its own __nocfi noinline function: a checked indirect
- * call to a kernel symbol is a CFI panic rather than an error return, and or_add() must stay checkable (the
- * cfi_sites.py gate looks for exactly this, including a helper that LTO inlined back into a caller without __nocfi). */
+ * call to a kernel symbol is a CFI panic rather than an error return, and or_add() must stay checkable -
+ * including a helper that LTO inlined back into a caller without __nocfi. */
 static __nocfi noinline int or_statfs_snapshot(const struct path *path, struct kstatfs *out)
 {
 	if (!or_vfs_statfs_fn)

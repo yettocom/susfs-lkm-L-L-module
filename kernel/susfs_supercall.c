@@ -445,8 +445,8 @@ static bool sc_registered;	/* sys_call_table path armed */
 static bool sc_kp_registered;	/* kprobe fallback armed */
 
 /* ---- ABI layout assertions ----
- * These sizes and `err` offsets ARE the userspace contract (ksu_susfs, ksud and
- * tools/susfs_sc compile against these numbers); a drift shows up as "the command returned
+ * These sizes and `err` offsets ARE the userspace contract (ksu_susfs and ksud
+ * compile against these numbers); a drift shows up as "the command returned
  * 0 and userspace printed garbage", not as a build error, and the repository's own
  * abi_layout_check/ harness is not wired into any build step - hence the trip wire here.
  * Values are aarch64 LP64, the only ABI shipped clients use, and match upstream's structs

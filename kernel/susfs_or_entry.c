@@ -157,8 +157,8 @@ module_param_named(or_entry, or_entry_param, bool, 0600);
 susfs_or_entry_fn_t susfs_or_entry_hook;
 
 /* Indirect call into the kernel for the one notification the skipped syscall would have sent, so it
- * sits in a __nocfi noinline function like every other one in this module (tools/cfi_sites.py fails
- * the build on an instrumented call site).  A kernel without the symbol only loses the notification,
+ * sits in a __nocfi noinline function like every other one in this module, so no instrumented call
+ * site is left behind.  A kernel without the symbol only loses the notification,
  * which is why this one may be NULL. */
 static __nocfi noinline void or_fsnotify_open(struct file *file)
 {
@@ -184,11 +184,11 @@ static __nocfi noinline void or_put_unused_fd(unsigned int fd)
 /* The original syscall is not called at all when this redirects, so nothing has to be undone if the
  * process is killed mid-way; the fd is installed last, which is the same order the kernel uses.
  *
- * __nocfi noinline is mandatory for every call through a runtime-resolved pointer (the rule
- * tools/cfi_sites.py enforces on the artifacts): without it, CFI instrumentation lands in whichever
- * function this ends up in - the opath wrapper - and a checked indirect call into the kernel is a
- * panic rather than an error return.  This is also why every kernel function above is held in a
- * plain pointer and called from here, never from the wrapper itself. */
+ * __nocfi noinline is mandatory for every call through a runtime-resolved pointer: without it, CFI
+ * instrumentation lands in whichever function this ends up in - the opath wrapper - and a checked
+ * indirect call into the kernel is a panic rather than an error return.  This is also why every
+ * kernel function above is held in a plain pointer and called from here, never from the wrapper
+ * itself. */
 static __nocfi noinline long or_entry_redirect(const struct pt_regs *regs, int kind)
 {
 	const char __user *uname = NULL;
