@@ -16,6 +16,7 @@
 | [`/proc/susfs_kstat`](#procsusfs_kstat) | `stat()`/`maps` 结果伪装 | `add_sus_kstat` / `add_sus_kstat_statically` / `update_sus_kstat` / `update_sus_kstat_full_clone` / `del` / `clear` |
 | [`/proc/susfs_open_redirect`](#procsusfs_open_redirect) | `open()` 重定向（含反向面：`d_path`/`statfs`/`maps`/`fdinfo`） | `add_open_redirect` / `del` / `clear` |
 | [`/proc/susfs_enable_log`](#procsusfs_enable_log) | 运行期日志开关 | `0` / `1` |
+| [`/proc/susfs_log`](#procsusfs_log) | 本次启动的日志环（256 行，`dmesg` 格式） | 写任意内容清空 |
 | [`/proc/susfs_avc_spoof`](#procsusfs_avc_spoof) | 隐藏 SELinux AVC 审计日志 | `0` / `1` |
 | [`/proc/susfs_hide_modules`](#procsusfs_hide_modules) | 按名字把**其它内核模块**从 `/proc/modules` 去掉 | `add <名字>` / `del <名字>` / `set <名字>…` / `clear` |
 | [`/proc/susfs_hide_mounts`](#procsusfs_hide_mounts) | 哪些挂载算"我们的"（决定隐藏的挂载集合） | `add <前缀>` / `del <前缀>` / `set <前缀>…` / `reset` / `clear` |
@@ -162,6 +163,23 @@ echo clear                                                      > /proc/susfs_op
 ## /proc/susfs_enable_log
 
 运行期日志开关（默认开）。
+
+---
+
+## /proc/susfs_log
+
+本次启动的日志环。**始终记录**，不受 `/proc/susfs_enable_log` 影响——那个开关只管 `dmesg`。
+
+256 个槽位，满了覆盖最旧的；每行 `[秒.微秒] 文本`。
+
+```
+susfs ring: 12 of 256 lines held for this boot
+timestamps read like dmesg; write anything here to clear the ring
+
+[   42.117034] susfs: kstat armed 14 of 14
+```
+
+**往这个节点写任意内容就清空整个环**——复现问题前先清一下，免得旧噪声混进来。
 
 ---
 

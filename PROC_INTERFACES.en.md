@@ -16,6 +16,7 @@ Write commands **return `len` on success, a negative errno on failure**.
 | [`/proc/susfs_kstat`](#procsusfs_kstat) | spoof `stat()`/`maps` results | `add_sus_kstat` / `add_sus_kstat_statically` / `update_sus_kstat` / `update_sus_kstat_full_clone` / `del` / `clear` |
 | [`/proc/susfs_open_redirect`](#procsusfs_open_redirect) | redirect `open()` (with the reverse side: `d_path`/`statfs`/`maps`/`fdinfo`) | `add_open_redirect` / `del` / `clear` |
 | [`/proc/susfs_enable_log`](#procsusfs_enable_log) | runtime log switch | `0` / `1` |
+| [`/proc/susfs_log`](#procsusfs_log) | This boot's log ring (256 lines, dmesg format) | write anything to clear |
 | [`/proc/susfs_avc_spoof`](#procsusfs_avc_spoof) | hide KernelSU traces in the SELinux AVC audit log | `0` / `1` |
 | [`/proc/susfs_hide_modules`](#procsusfs_hide_modules) | drop **other kernel modules** from `/proc/modules` by name | `add <name>` / `del <name>` / `set <name>…` / `clear` |
 | [`/proc/susfs_hide_mounts`](#procsusfs_hide_mounts) | which mounts count as "ours" (the set of mounts to hide) | `add <prefix>` / `del <prefix>` / `set <prefix>…` / `reset` / `clear` |
@@ -166,6 +167,23 @@ The reverse spoofing (`d_path()` / `statfs()` / fdinfo / `maps`) does **not** lo
 ## /proc/susfs_enable_log
 
 Runtime log switch (on by default).
+
+---
+
+## /proc/susfs_log
+
+This boot's log ring. **Always recording**, independent of `/proc/susfs_enable_log` — that switch only gates `dmesg`.
+
+256 slots, oldest overwritten first; each line is `[sec.usec] text`.
+
+```
+susfs ring: 12 of 256 lines held for this boot
+timestamps read like dmesg; write anything here to clear the ring
+
+[   42.117034] susfs: kstat armed 14 of 14
+```
+
+**Writing anything to this node clears the whole ring** — wipe it before reproducing a problem so old noise does not mix in.
 
 ---
 
