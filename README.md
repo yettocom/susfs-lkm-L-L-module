@@ -26,6 +26,17 @@ rmmod susfs_samsung_lkm
 
 `/proc/susfs_*` 控制节点见 [PROC_INTERFACES.md](PROC_INTERFACES.md)。
 
+## 仓库结构
+
+| 目录 | 内容 |
+|---|---|
+| `kernel/` | 模块源码。`susfs_*.c` 是各功能层；`susfs_rkp.c`、`susfs_arm64.h` 是分支补丁与 AArch64 指令判定；`kallrecon/lib/` 是符号解析（vendored，只编 `lib/`） |
+| `tools/` | 构建期工具。`build-loader.sh` 编 `bin/susfs_insmod`；`pack_module.py` 打模块 zip；`susfs_insmod.c`、`susfs_probe.c` 是 loader 与状态探针的源码 |
+| `module/` | KernelSU 模块骨架。`module.prop`、`customize.sh`、`post-mount.sh`、`late-load.sh`、`lib.sh`、`uninstall.sh`、`emulated-soft-reboot.sh`、`trampoline/` |
+| `bin/` | 预编译的 aarch64 静态程序。`susfs_insmod` 改重定位后加载 ko；`susfs_probe` 读 `/proc/susfs_status` |
+
+编译：`./build.sh`，在 DDK 容器里按三个 KMI 各编一次。
+
 ## 模块状态
 
 管理器模块列表里 `module.prop` 的描述显示当前状态（判定逻辑在 `module/lib.sh` 的 `status_refresh()`）：

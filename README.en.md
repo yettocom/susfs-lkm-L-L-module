@@ -27,6 +27,17 @@ rmmod susfs_samsung_lkm
 
 The `/proc/susfs_*` control nodes: see [PROC_INTERFACES.en.md](PROC_INTERFACES.en.md).
 
+## Repository layout
+
+| Directory | Contents |
+|---|---|
+| `kernel/` | Module sources. `susfs_*.c` are the feature layers; `susfs_rkp.c` and `susfs_arm64.h` hold the branch patcher and the AArch64 instruction tests; `kallrecon/lib/` is the vendored symbol resolver (only `lib/` is compiled) |
+| `tools/` | Build-time tools. `build-loader.sh` builds `bin/susfs_insmod`; `pack_module.py` builds the module zip; `susfs_insmod.c` and `susfs_probe.c` are the sources for the loader and the status probe |
+| `module/` | KernelSU module skeleton. `module.prop`, `customize.sh`, `post-mount.sh`, `late-load.sh`, `lib.sh`, `uninstall.sh`, `emulated-soft-reboot.sh`, `trampoline/` |
+| `bin/` | Prebuilt aarch64 static binaries. `susfs_insmod` rewrites relocations and loads the ko; `susfs_probe` reads `/proc/susfs_status` |
+
+Build: `./build.sh`, which builds all three KMIs inside the DDK container.
+
 ## Module status
 
 The description shown in the manager's module list is the live status (decided by
