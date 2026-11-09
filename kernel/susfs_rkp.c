@@ -130,7 +130,10 @@ bool susfs_arm64_kernel_has_bti(void)
  * A request past this table returns -ENOMEM and the callers only warn, so a hook added
  * upstream without widening the table stops working with nothing in dmesg that names it.
  * The stub page is the second ceiling (SUSFS_RKP_STUBS_PER_PAGE). */
-#define SUSFS_RKP_MAX_SITES 40	/* 30 today; the rest keeps the next few hooks from dropping silently */
+/* 30 today, and 44 once the LSM hooks move off kprobes onto this carrier.  A site that does not
+ * fit is dropped with a pr_warn and nothing else, so the table has to stay ahead of the sites
+ * rather than level with them - 40 was already one carrier away from silent loss. */
+#define SUSFS_RKP_MAX_SITES 48
 
 /*
  * One stub is 16 bytes, entry at +4:

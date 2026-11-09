@@ -230,6 +230,35 @@ static int ksu_lsm_hook_head_by_identity(unsigned long heads_addr, struct ksu_ls
  * that address points back at it, and an offset that lands on no list is -ENOENT (as in replace);
  * what it cannot see is an offset that lands on ANOTHER hook's list, which is why identity goes
  * first and says so when the two disagree. */
+/* The offsetof() slot is only meaningful if the word it names really is this hook's function.
+ * struct security_hook_list is __randomize_layout, and a module compiled without the kernel's
+ * layout puts the union somewhere else, so the read below returns a neighbour field instead.
+ * The head cross-check that runs before this one cannot see that: a list's first node has
+ * list.pprev == &head->first, which is exactly the value a mismatched offset lands on, so that
+ * check passes on a layout that is wrong.  Comparing against the resolved selinux_<member>
+ * address is what tells the two apart. */
+static bool ksu_lsm_hook_slot_is_impl(struct ksu_lsm_hook *hook, struct security_hook_list *e)
+{
+	unsigned long addrs[8];
+	char want[64];
+	void *fn = NULL;
+	int n, i;
+
+	snprintf(want, sizeof(want), "selinux_%s", hook->head_name);
+
+	n = ksu_find_symbol_all(want, addrs, (int)ARRAY_SIZE(addrs));
+	if (n <= 0)
+		return false;
+	if (ksu_lsm_read_ptr((const char *)e + hook->hook_offset, &fn))
+		return false;
+
+	for (i = 0; i < n; i++) {
+		if (fn == (void *)addrs[i])
+			return true;
+	}
+	return false;
+}
+
 static int ksu_lsm_hook_head_at(unsigned long heads_addr, struct ksu_lsm_hook *hook,
                                 struct hlist_head **out)
 {
@@ -289,6 +318,16 @@ static int ksu_lsm_hook_head_at(unsigned long heads_addr, struct ksu_lsm_hook *h
     if (first->head != head) {
         pr_err("lsm_hook: %s: entry at %px reports head %px, computed %px - struct security_hook_heads layout mismatch, refusing to patch\n",
                 hook->head_name ?: "unknown", first, first->head, head);
+        return -EINVAL;
+    }
+
+    /* The head cross-check above cannot see a wrong hook word: a list's first node has
+     * list.pprev == &head->first, which is exactly what a mismatched offset lands on, so it
+     * passes on a layout that is wrong.  The function word is the one value that differs. */
+    if (!ksu_lsm_hook_slot_is_impl(hook, first)) {
+        pr_err("lsm_hook: %s: offsetof() names %#lx for the hook word, and the first entry does not hold selinux_%s there - struct security_hook_list layout mismatch (__randomize_layout), refusing to patch\n",
+                hook->head_name ?: "unknown", (unsigned long)hook->hook_offset,
+                hook->head_name ?: "unknown");
         return -EINVAL;
     }
 
