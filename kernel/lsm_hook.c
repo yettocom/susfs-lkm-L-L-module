@@ -867,6 +867,7 @@ static int lsm_kprobe_install_one(struct ksu_lsm_hook *hook)
 {
     char sym[KSYM_SYMBOL_LEN];
     unsigned long addr;
+    u32 insn = 0;
     int ret, n;
 
     if (!hook || !hook->insert || !hook->kprobe_fn || !hook->head_name)
@@ -906,6 +907,16 @@ static int lsm_kprobe_install_one(struct ksu_lsm_hook *hook)
         return -ENOENT;
     }
 
+    /* A probe on the entry word takes the landing pad away.  Every one of these functions
+     * starts with paciasp, which is what an indirect call has to find at the entry under BTI,
+     * and a brk in its place turns the next indirect call into `Oops - BTI 0x36000002`
+     * (measured on a 5.15 Samsung image, at __arm64_sys_newfstatat+0x0).  Step over the pad
+     * instead.  +4 is safe on both builds: under pac-ret it is the prologue (sub sp / stp
+     * x29,x30, neither touches an argument register), and susfs_kp_skip_call() strips the
+     * signature paciasp just put on x30 before it returns to the caller. */
+    if (!copy_from_kernel_nofault(&insn, (void *)addr, sizeof(insn)) &&
+        susfs_arm64_insn_is_pad(insn))
+        addr += sizeof(insn);
     hook->kp.pre_handler = susfs_lsm_kprobe_pre;
     hook->kp.addr = (kprobe_opcode_t *)addr;
     ret = register_kprobe(&hook->kp);

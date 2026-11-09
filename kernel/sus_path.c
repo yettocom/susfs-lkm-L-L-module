@@ -860,9 +860,13 @@ static int sus_path_lsm_readlink(struct dentry *dentry);
         (void)hook;                                                                     \
         return fn(__VA_ARGS__);                                                         \
     }
-/* Probe the caller instead of the dispatcher, for the members where FULL LTO has inlined
- * the dispatcher away.  The decision function is unchanged; only the registers it reads
- * are, and those are written at the SUS_PATH_KPROBE site. */
+/* Probe the LSM implementation, not the dispatcher.  With FULL LTO the small security_*
+ * dispatchers are inlined into every caller, so the out-of-line copy survives only because it
+ * has external linkage and a probe on it arms and then never fires (measured: 11 of 14 on a
+ * 5.15 Samsung image).  The dispatch loop that gets inlined ends in an indirect call to the
+ * LSM implementation, and LTO cannot inline that away - selinux_<member> is always reached.
+ * The decision function is unchanged; only the registers it reads are, and those are written
+ * at the SUS_PATH_KPROBE site. */
 #define SUS_PATH_LSM_INSERT_AT(member, probe, replacement_fn, name)                      \
     KSU_LSM_HOOK_INSERT_KPROBE_AT(member, probe, replacement_fn, sus_path_kp_##name)
 #define SUS_PATH_LSM_INSERT(member, replacement_fn, name)                               \
@@ -954,16 +958,16 @@ SUS_PATH_KPROBE(inode_link, sus_path_inode_link,
 #endif
 
 static struct ksu_lsm_hook sus_path_unlink_hook =
-	SUS_PATH_LSM_INSERT(inode_unlink, sus_path_inode_unlink, inode_unlink);
+	SUS_PATH_LSM_INSERT_AT(inode_unlink, "selinux_inode_unlink", sus_path_inode_unlink, inode_unlink);
 
 static struct ksu_lsm_hook sus_path_rmdir_hook =
-	SUS_PATH_LSM_INSERT(inode_rmdir, sus_path_inode_rmdir, inode_rmdir);
+	SUS_PATH_LSM_INSERT_AT(inode_rmdir, "selinux_inode_rmdir", sus_path_inode_rmdir, inode_rmdir);
 
 static struct ksu_lsm_hook sus_path_rename_hook =
-	SUS_PATH_LSM_INSERT(inode_rename, sus_path_inode_rename, inode_rename);
+	SUS_PATH_LSM_INSERT_AT(inode_rename, "selinux_inode_rename", sus_path_inode_rename, inode_rename);
 
 static struct ksu_lsm_hook sus_path_link_hook =
-	SUS_PATH_LSM_INSERT(inode_link, sus_path_inode_link, inode_link);
+	SUS_PATH_LSM_INSERT_AT(inode_link, "selinux_inode_link", sus_path_inode_link, inode_link);
 
 /* ---- metadata and attribute operations ----
  *
@@ -1223,25 +1227,25 @@ SUS_PATH_KPROBE(path_notify, sus_path_path_notify,
 #endif
 
 static struct ksu_lsm_hook sus_path_statfs_hook =
-	SUS_PATH_LSM_INSERT(sb_statfs, sus_path_sb_statfs, sb_statfs);
+	SUS_PATH_LSM_INSERT_AT(sb_statfs, "selinux_sb_statfs", sus_path_sb_statfs, sb_statfs);
 
 static struct ksu_lsm_hook sus_path_setattr_hook =
-	SUS_PATH_LSM_INSERT(inode_setattr, sus_path_inode_setattr, inode_setattr);
+	SUS_PATH_LSM_INSERT_AT(inode_setattr, "selinux_inode_setattr", sus_path_inode_setattr, inode_setattr);
 
 static struct ksu_lsm_hook sus_path_getxattr_hook =
-	SUS_PATH_LSM_INSERT(inode_getxattr, sus_path_inode_getxattr, inode_getxattr);
+	SUS_PATH_LSM_INSERT_AT(inode_getxattr, "selinux_inode_getxattr", sus_path_inode_getxattr, inode_getxattr);
 
 static struct ksu_lsm_hook sus_path_listxattr_hook =
-	SUS_PATH_LSM_INSERT(inode_listxattr, sus_path_inode_listxattr, inode_listxattr);
+	SUS_PATH_LSM_INSERT_AT(inode_listxattr, "selinux_inode_listxattr", sus_path_inode_listxattr, inode_listxattr);
 
 static struct ksu_lsm_hook sus_path_setxattr_hook =
-	SUS_PATH_LSM_INSERT(inode_setxattr, sus_path_inode_setxattr, inode_setxattr);
+	SUS_PATH_LSM_INSERT_AT(inode_setxattr, "selinux_inode_setxattr", sus_path_inode_setxattr, inode_setxattr);
 
 static struct ksu_lsm_hook sus_path_removexattr_hook =
-	SUS_PATH_LSM_INSERT(inode_removexattr, sus_path_inode_removexattr, inode_removexattr);
+	SUS_PATH_LSM_INSERT_AT(inode_removexattr, "selinux_inode_removexattr", sus_path_inode_removexattr, inode_removexattr);
 
 static struct ksu_lsm_hook sus_path_notify_hook =
-	SUS_PATH_LSM_INSERT(path_notify, sus_path_path_notify, path_notify);
+	SUS_PATH_LSM_INSERT_AT(path_notify, "selinux_path_notify", sus_path_path_notify, path_notify);
 
 #if SUSFS_SAMSUNG_NO_PATCH_TEXT
 SUS_PATH_KPROBE(inode_getattr, sus_path_inode_getattr, (const struct path *)regs->regs[0]);
@@ -1252,16 +1256,16 @@ SUS_PATH_KPROBE(inode_readlink, sus_path_lsm_readlink,
 #endif
 
 static struct ksu_lsm_hook sus_path_getattr_hook =
-	SUS_PATH_LSM_INSERT_AT(inode_getattr, "vfs_getattr", sus_path_inode_getattr, inode_getattr);
+	SUS_PATH_LSM_INSERT_AT(inode_getattr, "selinux_inode_getattr", sus_path_inode_getattr, inode_getattr);
 
 static struct ksu_lsm_hook sus_path_perm_hook =
-	SUS_PATH_LSM_INSERT(inode_permission, sus_path_inode_permission, inode_permission);
+	SUS_PATH_LSM_INSERT_AT(inode_permission, "selinux_inode_permission", sus_path_inode_permission, inode_permission);
 
 /* r18.5 registers this one in the hook-list shape; on a Samsung kernel that write is refused,
  * so it goes through SUS_PATH_LSM_INSERT like every other hook here (kprobe carrier under
  * SUSFS_SAMSUNG_NO_PATCH_TEXT).  Returning 0 lets the real chain decide, see SUS_LSM_PASS_ORIG. */
 static struct ksu_lsm_hook sus_path_readlink_hook =
-	SUS_PATH_LSM_INSERT(inode_readlink, sus_path_lsm_readlink, inode_readlink);
+	SUS_PATH_LSM_INSERT_AT(inode_readlink, "selinux_inode_readlink", sus_path_lsm_readlink, inode_readlink);
 
 static atomic_t n_enoent_getattr = ATOMIC_INIT(0);
 static atomic_t n_enoent_perm = ATOMIC_INIT(0);
